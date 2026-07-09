@@ -1,0 +1,14 @@
+[project]
+name = "edgelab-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ai-edge-litert>=2.1.6",
+    "fastapi[standard]>=0.139.0",
+    "numpy>=2.5.1",
+    "opencv-python-headless>=5.0.0.93",
+    "pydantic>=2.13.4",
+    "uvicorn>=0.50.2",
+]
