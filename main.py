@@ -42,12 +42,17 @@ def detection():
         if not video_control_event.is_set():
             time.sleep(0.1)
             continue
+        
+        target_hardware_fps = getattr(app_state.model, 'fps_camera', 30)
 
         # JIKA SAKLAR MENYALA: Buka hardware kamera
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FPS, target_hardware_fps)
+        
+        real_hardware_fps = cap.get(cv2.CAP_PROP_FPS)
+        print(f"📸 [Hardware] Anda meminta: {target_hardware_fps} FPS | Driver V4L2 memberikan: {real_hardware_fps} FPS")
         
         if not cap.isOpened():
             print("❌ Error: Tidak bisa membuka webcam!")
@@ -182,7 +187,10 @@ class ThreadInput(BaseModel):
 
 class CoreInput(BaseModel):
     cores: list[int] = [0, 1, 2, 3]
-    
+
+class FpsInput(BaseModel):
+    fps_camera: int = 5
+
 # === API - BACKEND ===
 
 # START - STOP
@@ -248,6 +256,42 @@ async def handle_cores_state(config: CoreInput):
 async def get_current_cores():
     cores = getattr(app_state.model, 'cores', [2, 3])
     return {"cores": cores}
+
+# FPS CAMERA
+
+@app.get("/api/fps")
+async def get_current_fps():
+    try:
+        fps_camera = getattr(app_state.model, 'fps_camera', 5)
+        
+        return {
+            "status": "success",
+            "fps_camera": fps_camera
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to fetch FPS metrics: {str(e)}"
+        )
+        
+@app.post("/api/fps")
+async def handle_fps_state(config: FpsInput):
+    try:
+        data_fps = config.fps_camera
+        if data_fps <= 0:
+            raise HTTPException(status_code=400, detail="FPS harus lebih besar dari 0")
+        current_fps_target = getattr(app_state.model, 'fps_camera', 30)
+        if current_fps_target != data_fps:
+            app_state.model.fps_camera = data_fps
+            app_state.model.need_reload = True
+            return {"status": "success", "fps_camera": app_state.model.fps_camera}
+        return {"status": "success", "message": "Target FPS tidak berubah."}
+    except HTTPException as http_err:
+        raise http_err
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to update FPS target: {str(e)}"
+        )
 
 # STREAMING
 
