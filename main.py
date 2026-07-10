@@ -46,9 +46,9 @@ def detection():
         target_hardware_fps = getattr(app_state.model, 'fps_camera', 30)
 
         # JIKA SAKLAR MENYALA: Buka hardware kamera
-        cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_hardware_fps)
         
         real_hardware_fps = cap.get(cv2.CAP_PROP_FPS)
@@ -212,6 +212,21 @@ async def stop_video():
         latest_frame = None
     return {"status": "success", "message": "Sinyal stop kamera dikirim. Hardware dilepas."}
 
+@app.get("/video-info")
+async def get_video_info():
+    # Jika event dinilai True, berarti sedang 'start' (menyala)
+    if video_control_event.is_set():
+        return {
+            "status": "success",
+            "stream_status": "start"
+        }
+    
+    # Jika event dinilai False, berarti sedang 'stop' (mati)
+    return {
+        "status": "success",
+        "stream_status": "stop"
+    }
+    
 # THREAD
 
 @app.post("/api/thread")
