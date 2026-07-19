@@ -3,11 +3,12 @@ import threading
 import time
 import os
 import cv2
+import asyncio
 import numpy as np
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse
 from ai_edge_litert.interpreter import Interpreter
 from app_state import app_state
 
@@ -15,7 +16,7 @@ from app_state import app_state
 video_control_event = threading.Event()
 
 # ==== LABEL ====
- 
+
 PATH_MODEL = "models/model.tflite"
 PATH_LABEL = "models/labels.txt"
 
@@ -24,12 +25,13 @@ frame_lock = threading.Lock()
 
 # === DETECTION ===
 
+
 def detection():
     global latest_frame
-    
+
     labels = {}
     try:
-        with open(PATH_LABEL, 'r') as f:
+        with open(PATH_LABEL, "r") as f:
             for index, line in enumerate(f):
                 labels[index] = line.strip()
     except FileNotFoundError:
@@ -38,44 +40,47 @@ def detection():
 
     # Loop utama thread background
     while True:
-        # JIKA SAKLAR MATI: Thread akan tertidur di sini, tidak memakan CPU, dan kamera tertutup
         if not video_control_event.is_set():
             time.sleep(0.1)
             continue
-        
-        target_hardware_fps = getattr(app_state.model, 'fps_camera', 30)
+
+        target_hardware_fps = getattr(app_state.model, "fps_camera", app_state.model.num_threads)
 
         # JIKA SAKLAR MENYALA: Buka hardware kamera
         cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_hardware_fps)
-        
+
         real_hardware_fps = cap.get(cv2.CAP_PROP_FPS)
-        print(f"📸 [Hardware] Anda meminta: {target_hardware_fps} FPS | Driver V4L2 memberikan: {real_hardware_fps} FPS")
-        
+        print(
+            f"📸 [Hardware] Anda meminta: {target_hardware_fps} FPS | Driver V4L2 memberikan: {real_hardware_fps} FPS"
+        )
+
         if not cap.isOpened():
             print("❌ Error: Tidak bisa membuka webcam!")
             video_control_event.clear()
             continue
 
         current_threads = app_state.model.num_threads
-        active_cores = getattr(app_state.model, 'cores', [2, 3])
+        active_cores = getattr(app_state.model, "cores", [2, 3])
         cores_config(active_cores)
-        
+
         try:
-            interpreter = Interpreter(model_path=PATH_MODEL, num_threads=current_threads)
+            interpreter = Interpreter(
+                model_path=PATH_MODEL, num_threads=current_threads
+            )
             interpreter.allocate_tensors()
         except Exception as e:
             print(f"❌ Gagal alokasi interpreter: {e}")
             cap.release()
             time.sleep(1)
             continue
-        
+
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
-        input_height = input_details[0]['shape'][1]
-        input_width = input_details[0]['shape'][2]
+        input_height = input_details[0]["shape"][1]
+        input_width = input_details[0]["shape"][2]
 
         app_state.model.need_reload = False
 
@@ -87,27 +92,27 @@ def detection():
                 break
 
             # INTERUPSI 2: Jika ada sinyal ganti thread
-            if getattr(app_state.model, 'need_reload', False):
+            if getattr(app_state.model, "need_reload", False):
                 print("⚠️ [AI Server] Mendapat sinyal perubahan thread. Reloading...")
-                break 
+                break
 
             start_frame = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.01)
                 continue
-            
+
             # --- (Sisa kode inferensi TFLite Anda ke bawah tetap sama) ---
             image_resized = cv2.resize(frame, (input_width, input_height))
             input_data = np.expand_dims(image_resized, axis=0).astype(np.uint8)
-            interpreter.set_tensor(input_details[0]['index'], input_data)
+            interpreter.set_tensor(input_details[0]["index"], input_data)
             interpreter.invoke()
-            
-            boxes = interpreter.get_tensor(output_details[0]['index'])[0]
-            classes = interpreter.get_tensor(output_details[1]['index'])[0]
-            scores = interpreter.get_tensor(output_details[2]['index'])[0]
-            num_detections = int(interpreter.get_tensor(output_details[3]['index'])[0])
-            
+
+            boxes = interpreter.get_tensor(output_details[0]["index"])[0]
+            classes = interpreter.get_tensor(output_details[1]["index"])[0]
+            scores = interpreter.get_tensor(output_details[2]["index"])[0]
+            num_detections = int(interpreter.get_tensor(output_details[3]["index"])[0])
+
             for i in range(num_detections):
                 score = scores[i]
                 if score > 0.5:
@@ -119,23 +124,62 @@ def detection():
                     top = int(ymin * frame.shape[0])
                     bottom = int(ymax * frame.shape[0])
                     cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{label} ({score*100:.1f}%)", (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.putText(
+                        frame,
+                        f"{label} ({score*100:.1f}%)",
+                        (left, top - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                    )
 
             end_frame = time.perf_counter()
             fps = 1 / (end_frame - start_frame)
             forward_pass = (end_frame - start_frame) * 1000
-            
-            cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(frame, f"Forward-pass Time: {forward_pass:.2f} ms", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                    
+
+            # Batas Papan
+            tinggi_frame, lebar_frame, _ = frame.shape
+            lebar_kotak = 400
+            tinggi_kotak = 300
+            x1 = (lebar_frame - lebar_kotak) // 2
+            y1 = (tinggi_frame - tinggi_kotak) // 2
+            x2 = x1 + lebar_kotak
+            y2 = y1 + tinggi_kotak
+            titik_kiri_atas = (x1, y1)
+            titik_kanan_bawah = (x2, y2)
+            warna = (0, 255, 255)
+            ketebalan = 3
+            cv2.rectangle(frame, titik_kiri_atas, titik_kanan_bawah, warna, ketebalan)
+
+            cv2.putText(
+                frame,
+                f"FPS: {fps:.2f}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"Forward-pass Time: {forward_pass:.2f} ms",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 0, 0),
+                2,
+            )
+
             with frame_lock:
                 latest_frame = frame.copy()
-                
+
             time.sleep(0.001)
 
         # Keluar dari loop frame -> Lepas hardware kamera dengan aman
         cap.release()
         print("🔌 [AI Server] Hardware kamera berhasil dilepas secara aman.")
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -144,9 +188,10 @@ async def lifespan(app: FastAPI):
     print("🚀 Background Thread Deteksi Berhasil Dijalankan.")
     yield
 
+
 app = FastAPI(title="EdgeLab-AI API", lifespan=lifespan)
 
-# === MIDDLEWARE CORS === 
+# === MIDDLEWARE CORS ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -155,20 +200,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def generate():
+async def generate(request: Request):
     global latest_frame
-    while True:
-        with frame_lock:
-            if latest_frame is None:
-                time.sleep(0.01) 
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+
+            img_to_encode = None
+            with frame_lock:
+                if latest_frame is not None:
+                    img_to_encode = latest_frame.copy()
+
+            if img_to_encode is None:
+                await asyncio.sleep(0.01)
                 continue
-            ret, encoded_image = cv2.imencode(".jpg", latest_frame)
+
+            ret, encoded_image = cv2.imencode(".jpg", img_to_encode)
             if not ret:
+                await asyncio.sleep(0.01)
                 continue
-                
-        frame_bytes = encoded_image.tobytes()
-        yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
-        time.sleep(0.03) 
+
+            frame_bytes = encoded_image.tobytes()
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+            )
+
+            await asyncio.sleep(0.03)
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        video_control_event.clear()
+        with frame_lock:
+            latest_frame = None
 
 # === CORE CONFIG ===
 
@@ -180,16 +246,20 @@ def cores_config(core_list: list[int]):
     except Exception as e:
         print(f"❌ Gagal mengunci Core CPU: {e}")
 
+
 # === INPUT ===
 
 class ThreadInput(BaseModel):
     num_threads: int = 4
 
+
 class CoreInput(BaseModel):
     cores: list[int] = [0, 1, 2, 3]
 
+
 class FpsInput(BaseModel):
     fps_camera: int = 5
+
 
 # === API - BACKEND ===
 
@@ -202,6 +272,7 @@ async def start_video():
     video_control_event.set()
     return {"status": "success", "message": "Sinyal start kamera dikirim."}
 
+
 @app.get("/stop")
 async def stop_video():
     global latest_frame
@@ -210,28 +281,18 @@ async def stop_video():
     video_control_event.clear()
     with frame_lock:
         latest_frame = None
-    return {"status": "success", "message": "Sinyal stop kamera dikirim. Hardware dilepas."}
-
-@app.get("/video-info")
-async def get_video_info():
-    # Jika event dinilai True, berarti sedang 'start' (menyala)
-    if video_control_event.is_set():
-        return {
-            "status": "success",
-            "stream_status": "start"
-        }
-    
-    # Jika event dinilai False, berarti sedang 'stop' (mati)
     return {
         "status": "success",
-        "stream_status": "stop"
+        "message": "Sinyal stop kamera dikirim. Hardware dilepas.",
     }
-    
+
+
 # THREAD
+
 
 @app.post("/api/thread")
 async def handle_thread_state(config: ThreadInput):
-    try: 
+    try:
         data = config.num_threads
         if app_state.model.num_threads != data:
             app_state.model.num_threads = data
@@ -244,58 +305,61 @@ async def handle_thread_state(config: ThreadInput):
             detail=f"Failed to update thread allocation: {str(e)}",
         )
 
+
 @app.get("/api/thread")
 async def get_current_threads():
     return {"num_threads": app_state.model.num_threads}
 
+
 # CORES
- 
+
+
 @app.post("/api/cores")
 async def handle_cores_state(config: CoreInput):
     try:
         data_cores = config.cores
-        current_cores = getattr(app_state.model, 'cores', [2, 3])
+        current_cores = getattr(app_state.model, "cores", [2, 3])
         if current_cores != data_cores:
             app_state.model.cores = data_cores
             app_state.model.need_reload = True
-            
+
             return {"status": "success", "cores": app_state.model.cores}
-        
+
         return {"status": "success", "cores": app_state.model.cores}
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to fetch cores allocation: {str(e)}"
         )
 
+
 @app.get("/api/cores")
 async def get_current_cores():
-    cores = getattr(app_state.model, 'cores', [2, 3])
+    cores = getattr(app_state.model, "cores", [2, 3])
     return {"cores": cores}
 
+
 # FPS CAMERA
+
 
 @app.get("/api/fps")
 async def get_current_fps():
     try:
-        fps_camera = getattr(app_state.model, 'fps_camera', 5)
-        
-        return {
-            "status": "success",
-            "fps_camera": fps_camera
-        }
+        fps_camera = getattr(app_state.model, "fps_camera", 5)
+
+        return {"status": "success", "fps_camera": fps_camera}
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to fetch FPS metrics: {str(e)}"
+            status_code=500, detail=f"Failed to fetch FPS metrics: {str(e)}"
         )
-        
+
+
 @app.post("/api/fps")
 async def handle_fps_state(config: FpsInput):
     try:
         data_fps = config.fps_camera
         if data_fps <= 0:
             raise HTTPException(status_code=400, detail="FPS harus lebih besar dari 0")
-        current_fps_target = getattr(app_state.model, 'fps_camera', 30)
+        current_fps_target = getattr(app_state.model, "fps_camera", 30)
         if current_fps_target != data_fps:
             app_state.model.fps_camera = data_fps
             app_state.model.need_reload = True
@@ -308,11 +372,14 @@ async def handle_fps_state(config: FpsInput):
             status_code=500, detail=f"Failed to update FPS target: {str(e)}"
         )
 
+
 # STREAMING
 
+
 @app.get("/video")
-async def video_feed():
+async def video_feed(request: Request):
+    video_control_event.set()
+
     return StreamingResponse(
-        generate(), 
-        media_type="multipart/x-mixed-replace; boundary=frame"
+        generate(request), media_type="multipart/x-mixed-replace; boundary=frame"
     )
