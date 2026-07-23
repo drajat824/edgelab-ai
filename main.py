@@ -5,12 +5,20 @@ import os
 import cv2
 import asyncio
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    APIRouter,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from ai_edge_litert.interpreter import Interpreter
-from app_state import app_state
+from typing import List, Optional
+from app_state import app_state, Board
 
 # ==== VIDEO CONTROL ====
 video_control_event = threading.Event()
@@ -22,6 +30,35 @@ PATH_LABEL = "models/labels.txt"
 
 latest_frame = None
 frame_lock = threading.Lock()
+
+video_control_event = threading.Event()
+
+
+# === INPUT ===
+
+
+class ThreadInput(BaseModel):
+    num_threads: int = 4
+
+
+class CoreInput(BaseModel):
+    cores: list[int] = [0, 1, 2, 3]
+
+
+class FpsInput(BaseModel):
+    fps_camera: int = 5
+
+
+class BoardCreate(BaseModel):
+    board_id: str
+    board_name: str
+    ground_truth: List[str] = []
+
+
+class BoardUpdate(BaseModel):
+    board_name: Optional[str] = None
+    ground_truth: Optional[List[str]] = None
+
 
 # === DETECTION ===
 
@@ -35,31 +72,32 @@ def detection():
             for index, line in enumerate(f):
                 labels[index] = line.strip()
     except FileNotFoundError:
-        print(f"❌ Error: File label tidak ditemukan di {PATH_LABEL}")
+        print(f"❌ Error: Label file not found at {PATH_LABEL}")
+        app_state.model.camera_error = f"Label file not found at {PATH_LABEL}"
         return
 
-    # Loop utama thread background
+    # 🟢 Outer Loop: Berjalan terus selama server hidup
     while True:
+        # Jika sinyal stop aktif, tunggu di sini tanpa membunuh thread
         if not video_control_event.is_set():
-            time.sleep(0.1)
+            app_state.model.camera_error = None
+            time.sleep(0.2)  # Jeda ramah CPU
             continue
 
-        target_hardware_fps = getattr(app_state.model, "fps_camera", app_state.model.num_threads)
+        # --- Inisialisasi Kamera ---
+        app_state.model.camera_error = None
+        target_hardware_fps = getattr(app_state.model, "fps_camera", 15)
 
-        # JIKA SAKLAR MENYALA: Buka hardware kamera
         cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_hardware_fps)
 
-        real_hardware_fps = cap.get(cv2.CAP_PROP_FPS)
-        print(
-            f"📸 [Hardware] Anda meminta: {target_hardware_fps} FPS | Driver V4L2 memberikan: {real_hardware_fps} FPS"
-        )
-
         if not cap.isOpened():
-            print("❌ Error: Tidak bisa membuka webcam!")
+            print("❌ Error: Unable to open webcam!")
+            app_state.model.camera_error = "Error: Unable to open webcam"
             video_control_event.clear()
+            time.sleep(1.0)  # Beri waktu driver hardware melepaskan resource
             continue
 
         current_threads = app_state.model.num_threads
@@ -72,9 +110,11 @@ def detection():
             )
             interpreter.allocate_tensors()
         except Exception as e:
-            print(f"❌ Gagal alokasi interpreter: {e}")
+            print(f"❌ Failed to allocate TFLite interpreter: {e}")
+            app_state.model.camera_error = f"Failed to allocate TFLite interpreter: {e}"
             cap.release()
-            time.sleep(1)
+            video_control_event.clear()
+            time.sleep(1.0)
             continue
 
         input_details = interpreter.get_input_details()
@@ -84,25 +124,19 @@ def detection():
 
         app_state.model.need_reload = False
 
-        # Loop pemrosesan frame
-        while True:
-            # INTERUPSI 1: Jika tombol /stop ditekan (video_control_event dimatikan)
-            if not video_control_event.is_set():
-                print("🛑 [AI Server] Tombol stop ditekan. Mematikan kamera...")
-                break
-
-            # INTERUPSI 2: Jika ada sinyal ganti thread
+        # 🟢 Inner Loop: Frame Processing
+        while video_control_event.is_set():
             if getattr(app_state.model, "need_reload", False):
-                print("⚠️ [AI Server] Mendapat sinyal perubahan thread. Reloading...")
+                print("⚠️ Reloading thread/core configuration...")
                 break
 
             start_frame = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.01)
-                continue
+                continue  # Jangan break! Biarkan mencoba membaca frame berikutnya
 
-            # --- (Sisa kode inferensi TFLite Anda ke bawah tetap sama) ---
+            # Process TFLite inference
             image_resized = cv2.resize(frame, (input_width, input_height))
             input_data = np.expand_dims(image_resized, axis=0).astype(np.uint8)
             interpreter.set_tensor(input_details[0]["index"], input_data)
@@ -135,22 +169,20 @@ def detection():
                     )
 
             end_frame = time.perf_counter()
-            fps = 1 / (end_frame - start_frame)
+            fps = 1 / (end_frame - start_frame) if (end_frame - start_frame) > 0 else 0
             forward_pass = (end_frame - start_frame) * 1000
 
-            # Batas Papan
+            app_state.model.inference_fps = round(fps, 2)
+            app_state.model.forward_pass_ms = round(forward_pass, 2)
+
+            # Draw board bounding area
             tinggi_frame, lebar_frame, _ = frame.shape
-            lebar_kotak = 400
-            tinggi_kotak = 300
+            lebar_kotak, tinggi_kotak = 400, 300
             x1 = (lebar_frame - lebar_kotak) // 2
             y1 = (tinggi_frame - tinggi_kotak) // 2
-            x2 = x1 + lebar_kotak
-            y2 = y1 + tinggi_kotak
-            titik_kiri_atas = (x1, y1)
-            titik_kanan_bawah = (x2, y2)
-            warna = (0, 255, 255)
-            ketebalan = 3
-            cv2.rectangle(frame, titik_kiri_atas, titik_kanan_bawah, warna, ketebalan)
+            cv2.rectangle(
+                frame, (x1, y1), (x1 + lebar_kotak, y1 + tinggi_kotak), (0, 255, 255), 3
+            )
 
             cv2.putText(
                 frame,
@@ -176,22 +208,28 @@ def detection():
 
             time.sleep(0.001)
 
-        # Keluar dari loop frame -> Lepas hardware kamera dengan aman
+        # Clean up kamera saat keluar dari inner loop
         cap.release()
-        print("🔌 [AI Server] Hardware kamera berhasil dilepas secara aman.")
+        print("📸 Camera device released.")
+
+    print("🛑 Detection thread safely terminated.")
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    
     detection_thread = threading.Thread(target=detection, daemon=True)
     detection_thread.start()
     print("🚀 Background Thread Deteksi Berhasil Dijalankan.")
+
     yield
+
+    print("⏳ Server mematikan koneksi & background tasks...")
+    video_control_event.clear()
+    time.sleep(0.5)
 
 
 app = FastAPI(title="EdgeLab-AI API", lifespan=lifespan)
-
-# === MIDDLEWARE CORS ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -199,6 +237,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 async def generate(request: Request):
     global latest_frame
@@ -232,43 +271,15 @@ async def generate(request: Request):
     except asyncio.CancelledError:
         pass
     finally:
-        video_control_event.clear()
         with frame_lock:
             latest_frame = None
 
-# === CORE CONFIG ===
 
-def cores_config(core_list: list[int]):
-    try:
-        # Mengunci thread yang sedang berjalan saat ini ke daftar core yang dipilih
-        os.sched_setaffinity(0, set(core_list))
-        print(f"📌 [AI Server] Thread berhasil dikunci ke Core CPU: {core_list}")
-    except Exception as e:
-        print(f"❌ Gagal mengunci Core CPU: {e}")
+# VIDEO
 
-
-# === INPUT ===
-
-class ThreadInput(BaseModel):
-    num_threads: int = 4
-
-
-class CoreInput(BaseModel):
-    cores: list[int] = [0, 1, 2, 3]
-
-
-class FpsInput(BaseModel):
-    fps_camera: int = 5
-
-
-# === API - BACKEND ===
-
-# START - STOP
 
 @app.get("/start")
 async def start_video():
-    if video_control_event.is_set():
-        return {"status": "info", "message": "Kamera sudah dalam kondisi menyala."}
     video_control_event.set()
     return {"status": "success", "message": "Sinyal start kamera dikirim."}
 
@@ -276,8 +287,6 @@ async def start_video():
 @app.get("/stop")
 async def stop_video():
     global latest_frame
-    if not video_control_event.is_set():
-        return {"status": "info", "message": "Kamera sudah dalam kondisi mati."}
     video_control_event.clear()
     with frame_lock:
         latest_frame = None
@@ -287,7 +296,15 @@ async def stop_video():
     }
 
 
-# THREAD
+@app.get("/video")
+async def video_feed(request: Request):
+    video_control_event.set()
+    return StreamingResponse(
+        generate(request), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+# THREAD & CORE
 
 
 @app.post("/api/thread")
@@ -312,6 +329,15 @@ async def get_current_threads():
 
 
 # CORES
+
+
+def cores_config(core_list: list[int]):
+    try:
+        # Mengunci thread yang sedang berjalan saat ini ke daftar core yang dipilih
+        os.sched_setaffinity(0, set(core_list))
+        print(f"📌 [AI Server] Thread berhasil dikunci ke Core CPU: {core_list}")
+    except Exception as e:
+        print(f"❌ Gagal mengunci Core CPU: {e}")
 
 
 @app.post("/api/cores")
@@ -373,13 +399,106 @@ async def handle_fps_state(config: FpsInput):
         )
 
 
-# STREAMING
+# GET GT
+@app.get("/api/gt")
+async def get_all_boards():
+    return {"status": "success", "data": app_state.gt_state.boards}
 
 
-@app.get("/video")
-async def video_feed(request: Request):
-    video_control_event.set()
+# CREATE GT
+@app.post("/api/gt")
+async def create_board(payload: BoardCreate):
+    try:
+        # Check duplicate board_id
+        if any(b.board_id == payload.board_id for b in app_state.gt_state.boards):
+            raise HTTPException(status_code=400, detail="Board ID already exists")
 
-    return StreamingResponse(
-        generate(request), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+        new_board = Board(
+            board_id=payload.board_id,
+            board_name=payload.board_name,
+            ground_truth=payload.ground_truth,
+        )
+        app_state.gt_state.boards.append(new_board)
+
+        return {"status": "success", "message": "Board created", "data": new_board}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create board: {str(e)}")
+
+
+# UPDATE GT
+@app.put("/api/gt/{board_id}")
+async def update_board(board_id: str, payload: BoardUpdate):
+    try:
+        board = next(
+            (b for b in app_state.gt_state.boards if b.board_id == board_id), None
+        )
+        if not board:
+            raise HTTPException(status_code=404, detail="Board not found")
+
+        # Update properties if provided
+        if payload.board_name is not None:
+            board.board_name = payload.board_name
+        if payload.ground_truth is not None:
+            board.ground_truth = payload.ground_truth
+
+        return {"status": "success", "message": "Board updated", "data": board}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update board: {str(e)}")
+
+
+# DELETE GT
+@app.delete("/api/gt/{board_id}")
+async def delete_board(board_id: str):
+    try:
+        idx = next(
+            (
+                i
+                for i, b in enumerate(app_state.gt_state.boards)
+                if b.board_id == board_id
+            ),
+            None,
+        )
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Board not found")
+
+        deleted_board = app_state.gt_state.boards.pop(idx)
+        return {
+            "status": "success",
+            "message": f"Board {deleted_board.board_id} deleted",
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete board: {str(e)}")
+
+
+# WEB SOCKET
+
+
+router = APIRouter()
+
+
+@router.websocket("/ws/inference")
+async def websocket_inference(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(
+                {
+                    "camera_error": getattr(app_state.model, "camera_error", None),
+                    "inference_fps": getattr(app_state.model, "inference_fps", 0.0),
+                    "forward_pass_ms": getattr(app_state.model, "forward_pass_ms", 0.0),
+                }
+            )
+            await asyncio.sleep(0.5)
+    except (WebSocketDisconnect, RuntimeError):
+        print("⚠️ Client WebSocket disconnected.")
+    finally:
+        print("🧹 Cleanup WebSocket Done.")
+
+
+app.include_router(router)
