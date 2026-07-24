@@ -97,7 +97,7 @@ def detection() -> None:
         app_state.model.camera_error = None
         target_fps = getattr(app_state.model, "fps_camera", 15)
 
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_fps)
@@ -147,8 +147,11 @@ def detection() -> None:
             start_frame = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
+                error_msg = "Unable to open webcam device (/dev/video0)."
+                print(f"❌ [Detection Engine] {error_msg}")
+                app_state.model.camera_error = error_msg
                 time.sleep(0.01)
-                continue
+                break
 
             # Image Pre-processing
             image_resized = cv2.resize(frame, (input_width, input_height))
