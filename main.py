@@ -124,6 +124,8 @@ def detection() -> None:
             error_msg = f"Failed to allocate TFLite interpreter: {exc}"
             print(f"❌ [Detection Engine] {error_msg}")
             app_state.model.camera_error = error_msg
+            app_state.model.inference_fps = 0.0
+            app_state.model.forward_pass_ms = 0.0
             cap.release()
             video_control_event.clear()
             time.sleep(1.0)
@@ -213,6 +215,8 @@ def detection() -> None:
 
         # Device cleanup upon exiting processing loop
         cap.release()
+        app_state.model.inference_fps = 0.0
+        app_state.model.forward_pass_ms = 0.0
         print("📸 [Detection Engine] Camera hardware handle released.")
 
     print("🛑 [Detection Engine] Worker thread terminated cleanly.")
@@ -307,6 +311,8 @@ async def stop_video():
     video_control_event.clear()
     with frame_lock:
         latest_frame = None
+    app_state.model.inference_fps = 0.0
+    app_state.model.forward_pass_ms = 0.0
     return {
         "status": "success",
         "message": "Camera stream stopped. Hardware resource released.",
@@ -521,6 +527,23 @@ async def websocket_inference(websocket: WebSocket):
         print("⚠️ [WebSocket] Client connection closed.")
     finally:
         print("🧹 [WebSocket] Connection cleanup completed.")
+
+
+@config_router.get("/userspace-metrics")
+async def get_userspace_metrics():
+    try:
+        fps_camera = getattr(app_state.model, "fps_camera")
+        inference_fps = getattr(app_state.model, "inference_fps")
+        return {
+            "status": "success",
+            "fps_camera": fps_camera,
+            "inference_fps": inference_fps,
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve data",
+        )
 
 
 # ==============================================================================
