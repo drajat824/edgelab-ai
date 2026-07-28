@@ -23,7 +23,8 @@ from pydantic import BaseModel
 
 from app_state import Board, app_state
 
-PATH_MODEL = "models/model.tflite"
+PATH_MODEL = "models/efficientdet.tflite"
+# PATH_MODEL = "models/ssdmobilenet.tflite"
 PATH_LABEL = "models/labels.txt"
 
 # Thread Control Flags & Locks
@@ -32,10 +33,9 @@ video_control_event = threading.Event()
 frame_lock = threading.Lock()
 latest_frame: Optional[np.ndarray] = None
 
-
-# ==============================================================================
 # PYDANTIC SCHEMAS
-# ==============================================================================
+
+
 class ThreadInput(BaseModel):
     num_threads: int = 4
 
@@ -59,9 +59,9 @@ class BoardUpdate(BaseModel):
     ground_truth: Optional[List[str]] = None
 
 
-# ==============================================================================
 # HELPER FUNCTIONS & CORE WORKER
-# ==============================================================================
+
+
 def apply_core_affinity(core_list: List[int]) -> None:
     try:
         os.sched_setaffinity(0, set(core_list))
@@ -133,8 +133,10 @@ def detection() -> None:
 
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
-        input_height = input_details[0]["shape"][1]
-        input_width = input_details[0]["shape"][2]
+        # input_height = input_details[0]["shape"][1]
+        # input_width = input_details[0]["shape"][2]
+        input_height = 320
+        input_width = 320
 
         app_state.model.need_reload = False
 
@@ -257,9 +259,9 @@ async def generate_mjpeg_stream(request: Request):
             latest_frame = None
 
 
-# ==============================================================================
 # LIFESPAN & APPLICATION INSTANTIATION
-# ==============================================================================
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global is_server_running
@@ -287,18 +289,15 @@ app.add_middleware(
 )
 
 
-# ==============================================================================
 # ROUTERS DEFINITION
-# ==============================================================================
+
 video_router = APIRouter(prefix="", tags=["Video Control"])
 config_router = APIRouter(prefix="/api", tags=["Hardware & Model Configuration"])
 gt_router = APIRouter(prefix="/api/gt", tags=["Ground Truth Management"])
 ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 
-
-# ------------------------------------------------------------------------------
 # 1. VIDEO CONTROL ENDPOINTS
-# ------------------------------------------------------------------------------
+
 @video_router.get("/start")
 async def start_video():
     video_control_event.set()
@@ -328,9 +327,8 @@ async def video_feed(request: Request):
     )
 
 
-# ------------------------------------------------------------------------------
 # 2. CONFIGURATION ENDPOINTS (Thread, Core, FPS)
-# ------------------------------------------------------------------------------
+
 @config_router.get("/thread")
 async def get_current_threads():
     return {"num_threads": app_state.model.num_threads}
@@ -407,10 +405,8 @@ async def set_target_fps(config: FpsInput):
             detail=f"Failed to update target FPS: {str(exc)}",
         )
 
-
-# ------------------------------------------------------------------------------
 # 3. GROUND TRUTH MANAGEMENT ENDPOINTS
-# ------------------------------------------------------------------------------
+
 @gt_router.get("")
 async def get_all_boards():
     return {"status": "success", "data": app_state.gt_state.boards}
@@ -507,9 +503,8 @@ async def delete_board(board_id: str):
         )
 
 
-# ------------------------------------------------------------------------------
 # 4. WEBSOCKET ENDPOINTS
-# ------------------------------------------------------------------------------
+
 @ws_router.websocket("/inference")
 async def websocket_inference(websocket: WebSocket):
     await websocket.accept()
@@ -545,10 +540,8 @@ async def get_userspace_metrics():
             detail=f"Failed to retrieve data",
         )
 
-
-# ==============================================================================
 # ROUTER REGISTRATION
-# ==============================================================================
+
 app.include_router(video_router)
 app.include_router(config_router)
 app.include_router(gt_router)
