@@ -10,6 +10,7 @@ class ModelState:
     camera_error: str | None = None
     inference_fps: float = 0.0
     forward_pass_ms: float = 0.0
+    model: str = "efficientdet.tflite"
 
 @dataclass
 class Board:

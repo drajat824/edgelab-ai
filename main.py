@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from typing import List, Optional
+import shutil
 
 import cv2
 from ai_edge_litert.interpreter import Interpreter
@@ -16,16 +17,17 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
     status,
+    File,
+    UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+from pathlib import Path
 from app_state import Board, app_state
 
-PATH_MODEL = "models/efficientdet.tflite"
-# PATH_MODEL = "models/ssdmobilenet.tflite"
 PATH_LABEL = "models/labels.txt"
+UPLOAD_DIR = Path("./models")
 
 # Thread Control Flags & Locks
 is_server_running = True
@@ -57,6 +59,10 @@ class BoardCreate(BaseModel):
 class BoardUpdate(BaseModel):
     board_name: Optional[str] = None
     ground_truth: Optional[List[str]] = None
+
+
+class SelectModelRequest(BaseModel):
+    model_name: str
 
 
 # HELPER FUNCTIONS & CORE WORKER
@@ -97,7 +103,7 @@ def detection() -> None:
         app_state.model.camera_error = None
         target_fps = getattr(app_state.model, "fps_camera", 15)
 
-        cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
+        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_fps)
@@ -117,7 +123,8 @@ def detection() -> None:
 
         try:
             interpreter = Interpreter(
-                model_path=PATH_MODEL, num_threads=current_threads
+                model_path=Path("./models") / app_state.model.model,
+                num_threads=current_threads,
             )
             interpreter.allocate_tensors()
         except Exception as exc:
@@ -293,10 +300,12 @@ app.add_middleware(
 
 video_router = APIRouter(prefix="", tags=["Video Control"])
 config_router = APIRouter(prefix="/api", tags=["Hardware & Model Configuration"])
+file_router = APIRouter(prefix="/api", tags=["File Model Configuration"])
 gt_router = APIRouter(prefix="/api/gt", tags=["Ground Truth Management"])
 ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 
 # 1. VIDEO CONTROL ENDPOINTS
+
 
 @video_router.get("/start")
 async def start_video():
@@ -328,6 +337,7 @@ async def video_feed(request: Request):
 
 
 # 2. CONFIGURATION ENDPOINTS (Thread, Core, FPS)
+
 
 @config_router.get("/thread")
 async def get_current_threads():
@@ -405,7 +415,9 @@ async def set_target_fps(config: FpsInput):
             detail=f"Failed to update target FPS: {str(exc)}",
         )
 
+
 # 3. GROUND TRUTH MANAGEMENT ENDPOINTS
+
 
 @gt_router.get("")
 async def get_all_boards():
@@ -503,7 +515,67 @@ async def delete_board(board_id: str):
         )
 
 
+# Upload File
+@file_router.post("/upload-models")
+async def upload_file(file: UploadFile = File(...)):
+    assert file.filename is not None
+    filename = Path(file.filename).name
+    file_location = os.path.join(UPLOAD_DIR, filename)
+    try:
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal menyimpan berkas: {str(e)}",
+        )
+    finally:
+        await file.close()
+    return {
+        "message": "Berkas berhasil diunggah!",
+        "filename": file.filename,
+        "saved_path": file_location,
+    }
+
+
+@file_router.get("/models")
+async def get_tflite_models():
+    try:
+        model_files = [
+            f.name
+            for f in UPLOAD_DIR.iterdir()
+            if f.is_file() and f.name.endswith(".tflite")
+        ]
+        return {
+            "model_seelected": app_state.model.model,
+            "models": model_files
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Gagal membaca direktori: {str(e)}",
+        )
+
+
+@file_router.post("/models")
+async def set_active_model(payload: SelectModelRequest):
+    selected_name = payload.model_name.strip()
+    target_file = (UPLOAD_DIR / selected_name).with_suffix(".tflite")
+    if not target_file.exists() or not target_file.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Berkas model '{selected_name}' tidak ditemukan di folder models/.",
+        )
+    app_state.model.model = selected_name
+    app_state.model.need_reload = True
+    return {
+        "message": "Model berhasil diperbarui!",
+        "current_model": app_state.model.model,
+    }
+
+
 # 4. WEBSOCKET ENDPOINTS
+
 
 @ws_router.websocket("/inference")
 async def websocket_inference(websocket: WebSocket):
@@ -540,9 +612,11 @@ async def get_userspace_metrics():
             detail=f"Failed to retrieve data",
         )
 
+
 # ROUTER REGISTRATION
 
 app.include_router(video_router)
 app.include_router(config_router)
+app.include_router(file_router)
 app.include_router(gt_router)
 app.include_router(ws_router)
