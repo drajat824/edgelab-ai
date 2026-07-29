@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelState:
-    num_threads: int = 1
-    cores: List[int] = field(default_factory=lambda: [2, 3])
+    thread: int = 1
+    core: List[int] = field(default_factory=lambda: [2, 3])
     fps_camera: int = 15
     need_reload: bool = False
     camera_error: str | None = None

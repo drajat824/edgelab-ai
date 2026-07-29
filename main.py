@@ -39,11 +39,11 @@ latest_frame: Optional[np.ndarray] = None
 
 
 class ThreadInput(BaseModel):
-    num_threads: int = 4
+    thread: int = 4
 
 
 class CoreInput(BaseModel):
-    cores: List[int] = [0, 1, 2, 3]
+    core: List[int] = [0, 1, 2, 3]
 
 
 class FpsInput(BaseModel):
@@ -117,8 +117,8 @@ def detection() -> None:
             continue
 
         # --- TFLite & CPU Affinity Setup ---
-        current_threads = app_state.model.num_threads
-        active_cores = getattr(app_state.model, "cores", [2, 3])
+        current_threads = app_state.model.thread
+        active_cores = getattr(app_state.model, "core", [2, 3])
         apply_core_affinity(active_cores)
 
         try:
@@ -341,16 +341,16 @@ async def video_feed(request: Request):
 
 @config_router.get("/thread")
 async def get_current_threads():
-    return {"num_threads": app_state.model.num_threads}
+    return {"thread": app_state.model.thread}
 
 
 @config_router.post("/thread")
 async def set_thread_allocation(config: ThreadInput):
     try:
-        if app_state.model.num_threads != config.num_threads:
-            app_state.model.num_threads = config.num_threads
+        if app_state.model.thread != config.thread:
+            app_state.model.thread = config.thread
             app_state.model.need_reload = True
-            return {"status": "success", "num_threads": app_state.model.num_threads}
+            return {"status": "success", "thread": app_state.model.thread}
         return {"status": "success", "message": "Thread count unchanged."}
     except Exception as exc:
         raise HTTPException(
@@ -359,21 +359,21 @@ async def set_thread_allocation(config: ThreadInput):
         )
 
 
-@config_router.get("/cores")
+@config_router.get("/core")
 async def get_current_cores():
-    cores = getattr(app_state.model, "cores", [2, 3])
-    return {"cores": cores}
+    core = getattr(app_state.model, "core", [2, 3])
+    return {"core": core}
 
 
-@config_router.post("/cores")
+@config_router.post("/core")
 async def set_core_allocation(config: CoreInput):
     try:
-        current_cores = getattr(app_state.model, "cores", [2, 3])
-        if current_cores != config.cores:
-            app_state.model.cores = config.cores
+        current_cores = getattr(app_state.model, "core", [2, 3])
+        if current_cores != config.core:
+            app_state.model.core = config.core
             app_state.model.need_reload = True
-            return {"status": "success", "cores": app_state.model.cores}
-        return {"status": "success", "cores": app_state.model.cores}
+            return {"status": "success", "core": app_state.model.core}
+        return {"status": "success", "core": app_state.model.core}
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -546,10 +546,7 @@ async def get_tflite_models():
             for f in UPLOAD_DIR.iterdir()
             if f.is_file() and f.name.endswith(".tflite")
         ]
-        return {
-            "model_seelected": app_state.model.model,
-            "models": model_files
-        }
+        return {"selected_model": app_state.model.model, "models": model_files}
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -559,6 +556,7 @@ async def get_tflite_models():
 
 @file_router.post("/models")
 async def set_active_model(payload: SelectModelRequest):
+    print(payload.model_name)
     selected_name = payload.model_name.strip()
     target_file = (UPLOAD_DIR / selected_name).with_suffix(".tflite")
     if not target_file.exists() or not target_file.is_file():
