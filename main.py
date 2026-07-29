@@ -567,7 +567,7 @@ async def set_active_model(payload: SelectModelRequest):
     app_state.model.model = selected_name
     app_state.model.need_reload = True
     return {
-        "message": "Model berhasil diperbarui!",
+        "status": "success",
         "current_model": app_state.model.model,
     }
 
