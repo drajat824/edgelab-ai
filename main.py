@@ -532,7 +532,7 @@ async def upload_file(file: UploadFile = File(...)):
     finally:
         await file.close()
     return {
-        "message": "Berkas berhasil diunggah!",
+        "status": "success",
         "filename": file.filename,
         "saved_path": file_location,
     }
