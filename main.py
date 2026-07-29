@@ -531,6 +531,7 @@ async def upload_file(file: UploadFile = File(...)):
         )
     finally:
         await file.close()
+
     return {
         "status": "success",
         "filename": file.filename,
