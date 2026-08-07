@@ -3,7 +3,7 @@ import contextlib
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import shutil
 
 import cv2
@@ -31,9 +31,11 @@ UPLOAD_DIR = Path("./models")
 
 # Thread Control Flags & Locks
 is_server_running = True
-video_control_event = threading.Event()
 frame_lock = threading.Lock()
 latest_frame: Optional[np.ndarray] = None
+
+detection_control_event = threading.Event()
+calibrate_control_event = threading.Event()
 
 # PYDANTIC SCHEMAS
 
@@ -77,11 +79,12 @@ def apply_core_affinity(core_list: List[int]) -> None:
     except Exception as exc:
         print(f"❌ [CPU Manager] Failed to set CPU affinity: {exc}")
 
-
 def detection() -> None:
     global latest_frame, is_server_running
-
+    input_details = None
+    output_details = None
     labels = {}
+    
     try:
         with open(PATH_LABEL, "r") as f:
             for index, line in enumerate(f):
@@ -94,7 +97,10 @@ def detection() -> None:
 
     # Outer Loop: Survives throughout the application lifespan
     while is_server_running:
-        if not video_control_event.is_set():
+        is_det_active = detection_control_event.is_set()
+        is_cal_active = calibrate_control_event.is_set()
+        
+        if not is_det_active and not is_cal_active:
             app_state.model.camera_error = None
             time.sleep(0.2)
             continue
@@ -103,7 +109,7 @@ def detection() -> None:
         app_state.model.camera_error = None
         target_fps = getattr(app_state.model, "fps_camera", 15)
 
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
         cap.set(cv2.CAP_PROP_FPS, target_fps)
@@ -112,114 +118,119 @@ def detection() -> None:
             error_msg = "Unable to open webcam device (/dev/video0)."
             print(f"❌ [Detection Engine] {error_msg}")
             app_state.model.camera_error = error_msg
-            video_control_event.clear()
-            time.sleep(1.0)  # Grace period for hardware cleanup
+            detection_control_event.clear()
+            calibrate_control_event.clear()
+            time.sleep(1.0) 
             continue
 
-        # --- TFLite & CPU Affinity Setup ---
-        current_threads = app_state.model.thread
-        active_cores = getattr(app_state.model, "core", [2, 3])
-        apply_core_affinity(active_cores)
+        # --- Proses Deteksi ---
+        interpreter = None
+        if is_det_active: 
+            current_threads = app_state.model.thread
+            active_cores = getattr(app_state.model, "core", [2, 3])
+            apply_core_affinity(active_cores)
 
-        try:
-            interpreter = Interpreter(
-                model_path=Path("./models") / app_state.model.model,
-                num_threads=current_threads,
-            )
-            interpreter.allocate_tensors()
-        except Exception as exc:
-            error_msg = f"Failed to allocate TFLite interpreter: {exc}"
-            print(f"❌ [Detection Engine] {error_msg}")
-            app_state.model.camera_error = error_msg
-            app_state.model.inference_fps = 0.0
-            app_state.model.forward_pass_ms = 0.0
-            cap.release()
-            video_control_event.clear()
-            time.sleep(1.0)
-            continue
+            try:
+                interpreter = Interpreter(
+                    model_path=Path("./models") / app_state.model.model,
+                    num_threads=current_threads,
+                )
+                interpreter.allocate_tensors()
+                app_state.model.need_reload = False
+                input_details = interpreter.get_input_details()
+                output_details = interpreter.get_output_details()
+            except Exception as exc:
+                error_msg = f"Failed to allocate TFLite interpreter: {exc}"
+                print(f"❌ [Detection Engine] {error_msg}")
+                app_state.model.camera_error = error_msg
+                app_state.model.inference_fps = 0.0
+                app_state.model.forward_pass_ms = 0.0
+                cap.release()
+                detection_control_event.clear()
+                time.sleep(1.0)
+                continue
 
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
-        # input_height = input_details[0]["shape"][1]
-        # input_width = input_details[0]["shape"][2]
         input_height = 320
         input_width = 320
-
-        app_state.model.need_reload = False
-
-        # Inner Loop: High-Frequency Frame Capture & Inference
-        while is_server_running and video_control_event.is_set():
-            if getattr(app_state.model, "need_reload", False):
-                print(
-                    "⚠️ [Detection Engine] Reload trigger detected. Re-initializing pipeline..."
-                )
+        
+        while is_server_running:
+            current_det = detection_control_event.is_set()
+            current_cal = calibrate_control_event.is_set()
+            
+            if not current_det and not current_cal or getattr(app_state.model, "need_reload", False):
                 break
 
             start_frame = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
                 error_msg = "Unable to open webcam device (/dev/video0)."
-                print(f"❌ [Detection Engine] {error_msg}")
                 app_state.model.camera_error = error_msg
                 time.sleep(0.01)
                 break
+            
+            # Mode Deteksi Aktif 
+            if current_det and interpreter is not None and input_details is not None and output_details is not None:
+                image_resized = cv2.resize(frame, (input_width, input_height))
+                image_color = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
+                input_data = np.expand_dims(image_color, axis=0).astype(np.float32)
+                input_data = input_data / 255.0
+                
+                interpreter.set_tensor(input_details[0]["index"], input_data)
+                interpreter.invoke()
+                
+                scores = interpreter.get_tensor(output_details[0]["index"])[0]
+                boxes = interpreter.get_tensor(output_details[1]["index"])[0]
+                num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0])
+                classes = interpreter.get_tensor(output_details[3]["index"])[0]
+                
+                # Draw Annotations
+                for i in range(num_detections):
+                    score = scores[i]
+                    if score > 0.5:
+                        ymin, xmin, ymax, xmax = boxes[i]
+                        class_id = int(classes[i])
+                        class_id += 1
+                        
+                        label = labels.get(class_id, f"ID {class_id}")
 
-            # Image Pre-processing
-            image_resized = cv2.resize(frame, (input_width, input_height))
-            input_data = np.expand_dims(image_resized, axis=0).astype(np.uint8)
+                        left = int(xmin * frame.shape[1])
+                        right = int(xmax * frame.shape[1])
+                        top = int(ymin * frame.shape[0])
+                        bottom = int(ymax * frame.shape[0])
 
-            # Model Execution
-            interpreter.set_tensor(input_details[0]["index"], input_data)
-            interpreter.invoke()
+                        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                        # cv2.putText(
+                        #     frame,
+                        #     f"{label} ({score*100:.1f}%)",
+                        #     (left, top - 10),
+                        #     cv2.FONT_HERSHEY_SIMPLEX,
+                        #     0.6,
+                        #     (0, 255, 0),
+                        #     2,
+                        # )
 
-            boxes = interpreter.get_tensor(output_details[0]["index"])[0]
-            classes = interpreter.get_tensor(output_details[1]["index"])[0]
-            scores = interpreter.get_tensor(output_details[2]["index"])[0]
-            num_detections = int(interpreter.get_tensor(output_details[3]["index"])[0])
+                end_frame = time.perf_counter()
+                frame_duration = end_frame - start_frame
+                fps = 1 / frame_duration if frame_duration > 0 else 0
+                forward_pass = frame_duration * 1000
 
-            # Draw Annotations
-            for i in range(num_detections):
-                score = scores[i]
-                if score > 0.5:
-                    ymin, xmin, ymax, xmax = boxes[i]
-                    class_id = int(classes[i])
-                    label = labels.get(class_id, f"ID {class_id}")
+                app_state.model.inference_fps = round(fps, 2)
+                app_state.model.forward_pass_ms = round(forward_pass, 2)
+                
+            else:
+                app_state.model.inference_fps = 0.0
+                app_state.model.forward_pass_ms = 0.0
 
-                    left = int(xmin * frame.shape[1])
-                    right = int(xmax * frame.shape[1])
-                    top = int(ymin * frame.shape[0])
-                    bottom = int(ymax * frame.shape[0])
-
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                    cv2.putText(
-                        frame,
-                        f"{label} ({score*100:.1f}%)",
-                        (left, top - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 255, 0),
-                        2,
-                    )
-
-            end_frame = time.perf_counter()
-            frame_duration = end_frame - start_frame
-            fps = 1 / frame_duration if frame_duration > 0 else 0
-            forward_pass = frame_duration * 1000
-
-            app_state.model.inference_fps = round(fps, 2)
-            app_state.model.forward_pass_ms = round(forward_pass, 2)
-
-            # Draw Board Bounding Overlay
-            h_frame, w_frame, _ = frame.shape
-            w_box, h_box = 400, 300
+            # Gambar hanya garis vertikal
+            h_frame, w_frame = frame.shape[:2]
+            w_box = 500
             x1 = (w_frame - w_box) // 2
-            y1 = (h_frame - h_box) // 2
-            cv2.rectangle(frame, (x1, y1), (x1 + w_box, y1 + h_box), (0, 255, 255), 3)
-
-            # Thread-safe buffer update
+            x2 = x1 + w_box
+            cv2.line(frame, (x1, 0), (x1, h_frame), (0, 255, 255), 3)
+            cv2.line(frame, (x2, 0), (x2, h_frame), (0, 255, 255), 3)
+                
             with frame_lock:
                 latest_frame = frame.copy()
-
             time.sleep(0.001)
 
         # Device cleanup upon exiting processing loop
@@ -229,7 +240,6 @@ def detection() -> None:
         print("📸 [Detection Engine] Camera hardware handle released.")
 
     print("🛑 [Detection Engine] Worker thread terminated cleanly.")
-
 
 async def generate_mjpeg_stream(request: Request):
     global latest_frame
@@ -266,9 +276,6 @@ async def generate_mjpeg_stream(request: Request):
             latest_frame = None
 
 
-# LIFESPAN & APPLICATION INSTANTIATION
-
-
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global is_server_running
@@ -282,7 +289,7 @@ async def lifespan(app: FastAPI):
 
     print("⏳ [System Teardown] Shutting down services & background tasks...")
     is_server_running = False
-    video_control_event.clear()
+    detection_control_event.clear()
     time.sleep(0.5)
 
 
@@ -297,26 +304,33 @@ app.add_middleware(
 
 
 # ROUTERS DEFINITION
-
 video_router = APIRouter(prefix="", tags=["Video Control"])
 config_router = APIRouter(prefix="/api", tags=["Hardware & Model Configuration"])
 file_router = APIRouter(prefix="/api", tags=["File Model Configuration"])
 gt_router = APIRouter(prefix="/api/gt", tags=["Ground Truth Management"])
 ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 
-# 1. VIDEO CONTROL ENDPOINTS
+
+@video_router.get("/start-detection")
+async def start_detection():
+    calibrate_control_event.clear() 
+    detection_control_event.set()
+    app_state.model.need_reload = True
+    return {"status": "success", "message": "Camera stream with detection initiated."}
 
 
-@video_router.get("/start")
-async def start_video():
-    video_control_event.set()
-    return {"status": "success", "message": "Camera stream signal initiated."}
+@video_router.get("/start-calibrate")
+async def start_calibrate():
+    detection_control_event.clear()
+    calibrate_control_event.set()
+    return {"status": "success", "message": "Camera stream for calibration initiated."}
 
 
 @video_router.get("/stop")
 async def stop_video():
     global latest_frame
-    video_control_event.clear()
+    detection_control_event.clear()
+    calibrate_control_event.clear()
     with frame_lock:
         latest_frame = None
     app_state.model.inference_fps = 0.0
@@ -329,14 +343,10 @@ async def stop_video():
 
 @video_router.get("/video")
 async def video_feed(request: Request):
-    video_control_event.set()
     return StreamingResponse(
         generate_mjpeg_stream(request),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
-
-
-# 2. CONFIGURATION ENDPOINTS (Thread, Core, FPS)
 
 
 @config_router.get("/thread")
@@ -414,9 +424,6 @@ async def set_target_fps(config: FpsInput):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update target FPS: {str(exc)}",
         )
-
-
-# 3. GROUND TRUTH MANAGEMENT ENDPOINTS
 
 
 @gt_router.get("")
@@ -515,7 +522,6 @@ async def delete_board(board_id: str):
         )
 
 
-# Upload File
 @file_router.post("/upload-models")
 async def upload_file(file: UploadFile = File(...)):
     assert file.filename is not None
@@ -573,9 +579,6 @@ async def set_active_model(payload: SelectModelRequest):
     }
 
 
-# 4. WEBSOCKET ENDPOINTS
-
-
 @ws_router.websocket("/inference")
 async def websocket_inference(websocket: WebSocket):
     await websocket.accept()
@@ -611,8 +614,6 @@ async def get_userspace_metrics():
             detail=f"Failed to retrieve data",
         )
 
-
-# ROUTER REGISTRATION
 
 app.include_router(video_router)
 app.include_router(config_router)

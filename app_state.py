@@ -10,7 +10,7 @@ class ModelState:
     camera_error: str | None = None
     inference_fps: float = 0.0
     forward_pass_ms: float = 0.0
-    model: str = "ssdmobilenet.tflite"
+    model: str = "ssd-mobilenet.tflite"
 
 @dataclass
 class Board:
@@ -27,42 +27,43 @@ class GTState:
                 board_id="board-1",
                 board_name="Board 1",
                 ground_truth=[
+                    "Diamond_6",
+                    "Club_K",
+                    "Spades_K",
+                    "Club_9",
+                    "Diamond_8",
+                    "Club_J",
                     "Hearts_2",
-                    "",
-                    "",
-                    "Club_5",
-                    "Club_6",
-                    "Spades_7",
-                    "Club_8",
-                    "Spades_9",
-                    "Club_10",
-                    "Hearts_J",
-                    "Club_Q",
-                    "Hearts_K",
-                    "Hearts_J",
-                    "Club_Q",
-                    "Hearts_K",
+                    "Diamond_10",
+                    "Club_2",
+                    "Diamond_7",
+                    "Diamond_K",
+                    "Hearts_5",
+                    "Club_3",
+                    "Hearts_6",
+                    "Spades_Q"
+                    
                 ],
             ),
             Board(
                 board_id= "board-2",
                 board_name= "Board 2",
                 ground_truth= [
-                    "Spades_2",
-                    "Diamond_3",
+                    "Spades_3",
+                    "Hearts_J",
+                    "Club_Q",
+                    "Hearts_8",
+                    "Spades_9",
+                    "Diamond_4",
+                    "Club_6",
+                    "Club_5",
+                    "Hearts_3",
+                    "Hearts_4",
                     "Spades_4",
-                    "Diamond_5",
-                    "Spades_6",
-                    "Diamond_7",
-                    "Spades_8",
-                    "Diamond_9",
-                    "Spades_10",
-                    "Diamond_J",
-                    "Spades_Q",
-                    "Diamond_K",
-                    "Diamond_J",
-                    "Spades_Q",
-                    "Diamond_K",
+                    "Diamond_3",
+                    "Hearts_Q",
+                    "Hearts_9",
+                    "Hearts_A"
                 ]
             )
         ]
