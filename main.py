@@ -199,15 +199,15 @@ def detection() -> None:
                         bottom = int(ymax * frame.shape[0])
 
                         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                        # cv2.putText(
-                        #     frame,
-                        #     f"{label} ({score*100:.1f}%)",
-                        #     (left, top - 10),
-                        #     cv2.FONT_HERSHEY_SIMPLEX,
-                        #     0.6,
-                        #     (0, 255, 0),
-                        #     2,
-                        # )
+                        cv2.putText(
+                            frame,
+                            f"{score*100:.1f}%",
+                            (left, top - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 0),
+                            2,
+                        )
 
                 end_frame = time.perf_counter()
                 frame_duration = end_frame - start_frame
