@@ -68,7 +68,8 @@ class GTState:
             )
         ]
     )
-
+    active_board: str = 'board-1'
+    
 @dataclass
 class AppState:
     model: ModelState = field(default_factory=ModelState)
