@@ -1,6 +1,11 @@
-from typing import List
+from typing import List, Sequence, Any
 from dataclasses import dataclass, field
+from pydantic import BaseModel
 
+class Point(BaseModel):
+    x: float
+    y: float
+    
 @dataclass
 class ModelState:
     thread: int = 1
@@ -11,6 +16,7 @@ class ModelState:
     inference_fps: float = 0.0
     forward_pass_ms: float = 0.0
     model: str = "ssd-mobilenet.tflite"
+    calibration_points: Sequence[Any] = field(default_factory=list)
 
 @dataclass
 class Board:

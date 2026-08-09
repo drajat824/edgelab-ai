@@ -3,9 +3,8 @@ import contextlib
 import os
 import threading
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Tuple, Any
 import shutil
-
 import cv2
 from ai_edge_litert.interpreter import Interpreter
 import numpy as np
@@ -25,6 +24,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pathlib import Path
 from app_state import Board, app_state
+import math
+import cv2
+import numpy as np
 
 PATH_LABEL = "models/labels.txt"
 UPLOAD_DIR = Path("./models")
@@ -34,13 +36,13 @@ is_server_running = True
 frame_lock = threading.Lock()
 latest_frame: Optional[np.ndarray] = None
 
+camera_lock = threading.Lock()
 detection_control_event = threading.Event()
 calibrate_control_event = threading.Event()
+camera_hardware = 0
 
-# calibration_points: List[List[float]] = []
-# print(calibration_points, 'calibration_points')
 
-# PYDANTIC SCHEMAS
+# PYDANTIC SCHEMASc
 
 
 class ThreadInput(BaseModel):
@@ -69,18 +71,113 @@ class BoardUpdate(BaseModel):
 class SelectModelRequest(BaseModel):
     model_name: str
 
+
 class Point(BaseModel):
     x: float
     y: float
 
+
 class StartDetection(BaseModel):
     calibration_points: List[Point] = []
 
+
 class ActiveBoard(BaseModel):
     active_board: str
-    
-# HELPER FUNCTIONS & CORE WORKER
 
+#  ==== START SORTED CARDS ====
+
+def get_board_matrices(calibration_points, target_w=3900, target_h=3180):
+    pts_src = np.array([
+        [p.x, p.y] if hasattr(p, 'x') else [p['x'], p['y']] if isinstance(p, dict) else p 
+        for p in calibration_points
+    ], dtype=np.float32)
+    
+    pts_dst = np.array([
+        [0, 0],
+        [target_w - 1, 0],
+        [target_w - 1, target_h - 1],
+        [0, target_h - 1]
+    ], dtype=np.float32)
+    
+    M = cv2.getPerspectiveTransform(pts_src, pts_dst)
+    M_inv = cv2.getPerspectiveTransform(pts_dst, pts_src)
+    
+    return M, M_inv
+
+def warp_board(image, M, target_w=320, target_h=320):
+    return cv2.warpPerspective(image, M, (target_w, target_h))
+
+def get_slot_center(img_w: int = 3900, img_h: int = 3180) -> Dict[int, Tuple[float, float]]:
+    
+    scale_x = img_w / 39.0
+    scale_y = img_h / 31.8
+    
+    margin_x_px = 2.0 * scale_x
+    margin_y_px = 2.0 * scale_y
+    gap_x_px = 1.0 * scale_x
+    gap_y_px = 1.0 * scale_y
+    
+    slot_w_px = (img_w - (2 * margin_x_px) - (4 * gap_x_px)) / 5
+    slot_h_px = (img_h - (2 * margin_y_px) - (2 * gap_y_px)) / 3
+    
+    slot_centers = {}
+    
+    for row in range(3):
+        for col in range(5):
+            slot_id = (row * 5) + col + 1
+            
+            # Rumus koordinat titik tengah ideal
+            center_x = margin_x_px + (col * (slot_w_px + gap_x_px)) + (slot_w_px / 2.0)
+            center_y = margin_y_px + (row * (slot_h_px + gap_y_px)) + (slot_h_px / 2.0)
+            
+            slot_centers[slot_id] = (center_x, center_y)
+            
+    return slot_centers
+
+def map_to_15_slots(detections: List[Dict[str, Any]], slot_centers: Dict[int, Tuple[float, float]]) -> List[Dict[str, Any]]:
+    
+    grid_slots = {
+        sid: {
+            "slot_id": sid, 
+            "label": "NULL", 
+            "confidence": 0.0,
+        }
+        for sid in range(1, 16)
+    }
+    
+    for det in detections:
+        x1, y1, x2, y2 = det['bbox']
+        
+        # Hitung titik tengah kartu dari Bounding Box AI
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+
+        best_slot_id = None
+        min_distance = float('inf')
+
+        # Hitung jarak ke 15 titik pusat slot
+        for slot_id, (scx, scy) in slot_centers.items():
+            dist = math.sqrt((cx - scx)**2 + (cy - scy)**2)
+            if dist < min_distance:
+                min_distance = dist
+                best_slot_id = slot_id
+
+        # Masukkan kartu ke slot terdekat
+        if best_slot_id is not None:
+            current = grid_slots[best_slot_id]
+            if current["label"] == "NULL" or det["confidence"] > current["confidence"]:
+                grid_slots[best_slot_id] = {
+                    "slot_id": best_slot_id,
+                    "label": det["label"],
+                    "confidence": round(float(det["confidence"]), 2)
+                }
+
+    # Urutkan array dari slot 1 sampai 15
+    return [grid_slots[i] for i in range(1, 16)]
+
+#  ==== END SORTED CARDS ====
+
+# HELPER FUNCTIONS & CORE WORKER
 
 def apply_core_affinity(core_list: List[int]) -> None:
     try:
@@ -91,208 +188,247 @@ def apply_core_affinity(core_list: List[int]) -> None:
     except Exception as exc:
         print(f"❌ [CPU Manager] Failed to set CPU affinity: {exc}")
 
+# ==== DETEKSI ====
+
 def detection() -> None:
     global latest_frame, is_server_running
-    input_details = None
-    output_details = None
-    labels = {}
+    app_state.model.camera_error = None 
+    target_fps = getattr(app_state.model, "fps_camera", 15) 
+    slot_centers = get_slot_center()
     
+    labels = {}
+
     try:
         with open(PATH_LABEL, "r") as f:
             for index, line in enumerate(f):
                 labels[index] = line.strip()
+
     except FileNotFoundError:
         error_msg = f"Label file not found at '{PATH_LABEL}'"
         print(f"❌ [Detection Engine] {error_msg}")
         app_state.model.camera_error = error_msg
         return
 
-    # Outer Loop
     while is_server_running:
-        is_det_active = detection_control_event.is_set()
-        is_cal_active = calibrate_control_event.is_set()
-        
-        # Jika keduanya mati, tunggu sebentar
-        if not is_det_active and not is_cal_active:
-            app_state.model.camera_error = None
-            time.sleep(0.2)
+        if not detection_control_event.is_set():
+            time.sleep(0.1)
             continue
 
-        # ==== KALIBRASI ====
-        if is_cal_active and not is_det_active:
-            app_state.model.camera_error = None
-            cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
-            cap.set(cv2.CAP_PROP_FPS, 30) # Calibrate biasanya butuh FPS tinggi/stabil
+        app_state.model.camera_error = None
+        target_fps = getattr(app_state.model, "fps_camera", 15)
+        calibration_points = getattr(app_state.model, "calibration_points", [])
 
-            if not cap.isOpened():
-                error_msg = "Unable to open webcam device for calibration (/dev/video2)."
-                print(f"❌ [Detection Engine] {error_msg}")
-                app_state.model.camera_error = error_msg
-                calibrate_control_event.clear()
-                time.sleep(1.0)
-                continue
+        cap = None
+        max_retries = 5
 
-            print("📸 [Calibration Engine] Stream started.")
+        for attempt in range(max_retries):
+            cap = cv2.VideoCapture(camera_hardware, cv2.CAP_V4L2)
             
-            while is_server_running and calibrate_control_event.is_set() and not detection_control_event.is_set():
-                ret, frame = cap.read()
-                if not ret:
-                    app_state.model.camera_error = "Failed to capture frame in calibration."
-                    time.sleep(0.01)
-                    break
-
-                app_state.model.inference_fps = 0.0
-                app_state.model.forward_pass_ms = 0.0
-
-                # Gambar garis vertikal panduan kalibrasi
-                h_frame, w_frame = frame.shape[:2]
-                w_box = 500
-                x1 = (w_frame - w_box) // 2
-                x2 = x1 + w_box
-                cv2.line(frame, (x1, 0), (x1, h_frame), (0, 255, 255), 3)
-                cv2.line(frame, (x2, 0), (x2, h_frame), (0, 255, 255), 3)
-
-                with frame_lock:
-                    latest_frame = frame.copy()
-                time.sleep(0.001)
-
-            cap.release()
-            print("📸 [Calibration Engine] Camera hardware handle released.")
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
+                cap.set(cv2.CAP_PROP_FPS, target_fps)
+                break
+            if cap:
+                cap.release()
             time.sleep(0.3)
+
+        if cap is None or not cap.isOpened():
+            error_msg = "Unable to open webcam device (/dev/video2)."
+            app_state.model.camera_error = error_msg
+            detection_control_event.clear()
+            time.sleep(1.0)
+            continue
+
+        if not cap.isOpened():
+            error_msg = ("Unable to open webcam device (/dev/video2).")
+            app_state.model.camera_error = error_msg
+            detection_control_event.clear()
+            cap.release()
+            time.sleep(1.0)
             continue
         
-        # ==== DETEKSI ==== 
-        if is_det_active:
-            app_state.model.camera_error = None
-            target_fps = getattr(app_state.model, "fps_camera", 15)
+        current_threads = app_state.model.thread
+        active_cores = getattr(app_state.model,"core",[2, 3])
+        apply_core_affinity(active_cores)
+        interpreter = None
 
-            cap = cv2.VideoCapture(2, cv2.CAP_V4L2)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
-            cap.set(cv2.CAP_PROP_FPS, target_fps)
+        try:
+            interpreter = Interpreter(model_path=Path("./models") / app_state.model.model, num_threads=current_threads)
+            interpreter.allocate_tensors()
+            app_state.model.need_reload = False
+            input_details = (interpreter.get_input_details())
+            output_details = (interpreter.get_output_details())
 
-            if not cap.isOpened():
-                error_msg = "Unable to open webcam device for detection (/dev/video2)."
-                print(f"❌ [Detection Engine] {error_msg}")
-                app_state.model.camera_error = error_msg
-                detection_control_event.clear()
-                time.sleep(1.0)
-                continue
-
-            # Inisialisasi TFLite Interpreter
-            interpreter = None
-            current_threads = app_state.model.thread
-            active_cores = getattr(app_state.model, "core", [2, 3])
-            apply_core_affinity(active_cores)
-
-            try:
-                interpreter = Interpreter(
-                    model_path=Path("./models") / app_state.model.model,
-                    num_threads=current_threads,
-                )
-                interpreter.allocate_tensors()
-                app_state.model.need_reload = False
-                input_details = interpreter.get_input_details()
-                output_details = interpreter.get_output_details()
-            except Exception as exc:
-                error_msg = f"Failed to allocate TFLite interpreter: {exc}"
-                print(f"❌ [Detection Engine] {error_msg}")
-                app_state.model.camera_error = error_msg
-                app_state.model.inference_fps = 0.0
-                app_state.model.forward_pass_ms = 0.0
-                app_state.model.need_reload = False
-                cap.release()
-                detection_control_event.clear()
-                time.sleep(1.0)
-                continue
-
-            input_height = 320
-            input_width = 320
-            print("🧠 [Detection Engine] AI Inference loop started.")
-
-            while is_server_running and detection_control_event.is_set():
-                # Jika ada trigger ganti model/config (need_reload), keluar dari loop ini untuk reload ulang
-                if getattr(app_state.model, "need_reload", False):
-                    app_state.model.need_reload = False
-                    break
-
-                start_frame = time.perf_counter()
-                ret, frame = cap.read()
-                if not ret:
-                    app_state.model.camera_error = "Failed to capture frame in detection."
-                    time.sleep(0.01)
-                    break
-                
-                # Proses AI Inference
-                if interpreter is not None and input_details is not None and output_details is not None:
-                    image_resized = cv2.resize(frame, (input_width, input_height))
-                    image_color = cv2.cvtColor(image_resized, cv2.COLOR_BGR2RGB)
-                    input_data = np.expand_dims(image_color, axis=0).astype(np.float32)
-                    input_data = input_data / 255.0
-                    
-                    interpreter.set_tensor(input_details[0]["index"], input_data)
-                    interpreter.invoke()
-                    
-                    scores = interpreter.get_tensor(output_details[0]["index"])[0]
-                    boxes = interpreter.get_tensor(output_details[1]["index"])[0]
-                    num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0])
-                    classes = interpreter.get_tensor(output_details[3]["index"])[0]
-                    
-                    # Draw Annotations
-                    for i in range(num_detections):
-                        score = scores[i]
-                        if score > 0.5:
-                            ymin, xmin, ymax, xmax = boxes[i]
-                            class_id = int(classes[i])
-                            class_id += 1
-                            
-                            label = labels.get(class_id, f"ID {class_id}")
-                            left = int(xmin * frame.shape[1])
-                            right = int(xmax * frame.shape[1])
-                            top = int(ymin * frame.shape[0])
-                            bottom = int(ymax * frame.shape[0])
-
-                            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-                            cv2.putText(
-                                frame,
-                                f"{score*100:.1f}%",
-                                (left, top - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.6,
-                                (0, 255, 0),
-                                2,
-                            )
-
-                    end_frame = time.perf_counter()
-                    frame_duration = end_frame - start_frame
-                    fps = 1 / frame_duration if frame_duration > 0 else 0
-                    forward_pass = frame_duration * 1000
-
-                    app_state.model.inference_fps = round(fps, 2)
-                    app_state.model.forward_pass_ms = round(forward_pass, 2)
-
-                # Gambar garis panduan
-                h_frame, w_frame = frame.shape[:2]
-                w_box = 500
-                x1 = (w_frame - w_box) // 2
-                x2 = x1 + w_box
-                cv2.line(frame, (x1, 0), (x1, h_frame), (0, 255, 255), 3)
-                cv2.line(frame, (x2, 0), (x2, h_frame), (0, 255, 255), 3)
-                    
-                with frame_lock:
-                    latest_frame = frame.copy()
-                time.sleep(0.001)
-
-            cap.release()
+        except Exception as exc:
+            error_msg = (f"Failed to allocate TFLite "f"interpreter: {exc}")
+            app_state.model.camera_error = error_msg
             app_state.model.inference_fps = 0.0
             app_state.model.forward_pass_ms = 0.0
-            print("📸 [Detection Engine] Camera hardware handle released.")
-            time.sleep(0.3)
+            cap.release()
+            detection_control_event.clear()
+            time.sleep(1.0)
+            continue
 
-    print("🛑 [Detection Engine] Worker thread terminated cleanly.")
-    
+        while is_server_running and detection_control_event.is_set():
+            if getattr(app_state.model, "need_reload", False): 
+                app_state.model.need_reload = False 
+                break
+            
+            start_frame = time.perf_counter()
+            ret, frame = cap.read()
+            if not ret:
+                app_state.model.camera_error = "Failed to capture frame in detection."
+                time.sleep(0.01)
+                break
+            
+            M_320, _ = get_board_matrices(calibration_points, target_w=320, target_h=320) 
+            _, M_inv = get_board_matrices(calibration_points, target_w=3900, target_h=3180)
+            
+            warped_board = warp_board(frame, M_320, target_w=320, target_h=320)
+            
+            if warped_board is None or not isinstance(warped_board, np.ndarray): 
+                continue
+            
+            if interpreter is not None and input_details is not None and output_details is not None:
+                image_color = cv2.cvtColor(warped_board, cv2.COLOR_BGR2RGB)
+                input_data = np.expand_dims(image_color, axis=0).astype(np.float32) / 255.0
+                
+                interpreter.set_tensor(input_details[0]["index"], input_data) 
+                interpreter.invoke()
+                
+                scores = interpreter.get_tensor(output_details[0]["index"])[0] 
+                boxes = interpreter.get_tensor(output_details[1]["index"])[0] 
+                num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0]) 
+                classes = interpreter.get_tensor(output_details[3]["index"])[0]
+                
+                raw_detections = []
+                frame_h, frame_w = frame.shape[:2]
+                
+                for i in range(num_detections):
+                    score = scores[i]
+                    if score > 0.5:
+                        ymin, xmin, ymax, xmax = boxes[i]
+                        class_id = int(classes[i]) + 1
+                        label = labels.get(class_id, f"ID {class_id}")
+                        
+                        # Koordinat 
+                        left_b = xmin * 3900 
+                        right_b = xmax * 3900 
+                        top_b = ymin * 3180 
+                        bottom_b = ymax * 3180
+                        
+                        raw_detections.append({
+                            "label": label,
+                            "confidence": float(score),
+                            "bbox": [int(left_b), int(top_b), int(right_b), int(bottom_b)]
+                        })
+                        
+                        bbox_pts = np.array([ 
+                            [[left_b, top_b]], 
+                            [[right_b, top_b]], 
+                            [[right_b, bottom_b]],
+                            [[left_b, bottom_b]] 
+                        ], dtype=np.float32)
+                        
+                        transformed_pts = cv2.perspectiveTransform(bbox_pts, M_inv)
+                        
+                        x_coords = transformed_pts[:, 0, 0]
+                        y_coords = transformed_pts[:, 0, 1]
+                        
+                        left_raw = max(0, int(np.min(x_coords))) 
+                        top_raw = max(0, int(np.min(y_coords))) 
+                        right_raw = min(frame_w, int(np.max(x_coords))) 
+                        bottom_raw = min(frame_h, int(np.max(y_coords)))
+                        
+                        cv2.rectangle(frame, (left_raw, top_raw), (right_raw, bottom_raw), (0, 255, 0), 2)
+                
+                final_15_slots = map_to_15_slots(raw_detections, slot_centers)
+                print(final_15_slots)
+                
+                end_frame = time.perf_counter()
+                frame_duration = end_frame - start_frame
+                fps = 1 / frame_duration if frame_duration > 0 else 0
+                forward_pass = frame_duration * 1000
+                
+                app_state.model.inference_fps = round(fps, 2) 
+                app_state.model.forward_pass_ms = round(forward_pass, 2)
+                
+            with frame_lock:
+                latest_frame = frame.copy()
+                
+            time.sleep(0.001)
+
+        cap.release()
+        app_state.model.inference_fps = 0.0
+        app_state.model.forward_pass_ms = 0.0
+        time.sleep(0.3)
+        
+# ==== KALIBRASI ====
+
+def calibration() -> None:
+    global latest_frame, is_server_running
+
+    while is_server_running:
+        if not calibrate_control_event.is_set():
+            time.sleep(0.1)
+            continue
+
+        app_state.model.camera_error = None
+        cap = cv2.VideoCapture(camera_hardware, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
+        cap.set(cv2.CAP_PROP_FPS, getattr(app_state.model, "fps_camera", 15))
+
+        if not cap.isOpened():
+
+            error_msg = (
+                "Unable to open webcam "
+                "for calibration."
+            )
+
+            app_state.model.camera_error = error_msg
+            calibrate_control_event.clear()
+            cap.release()
+            time.sleep(1.0)
+            continue
+
+        while (
+            is_server_running
+            and calibrate_control_event.is_set()
+        ):
+
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            h_frame, w_frame = frame.shape[:2]
+            w_box = 500
+            x1 = (w_frame - w_box) // 2
+            x2 = x1 + w_box
+            
+            cv2.line(
+                frame,
+                (x1, 0),
+                (x1, h_frame),
+                (0, 255, 255),
+                3
+            )
+
+            cv2.line(
+                frame,
+                (x2, 0),
+                (x2, h_frame),
+                (0, 255, 255),
+                3
+            )
+
+            with frame_lock:
+                latest_frame = frame.copy()
+            time.sleep(0.001)
+            
+        cap.release()
+
 async def generate_mjpeg_stream(request: Request):
     global latest_frame
     try:
@@ -331,18 +467,37 @@ async def generate_mjpeg_stream(request: Request):
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global is_server_running
+
     is_server_running = True
 
-    detection_thread = threading.Thread(target=detection, daemon=True)
+    detection_thread = threading.Thread(
+        target=detection,
+        daemon=True,
+        name="DetectionWorker"
+    )
+
+    calibration_thread = threading.Thread(
+        target=calibration,
+        daemon=True,
+        name="CalibrationWorker"
+    )
+
     detection_thread.start()
-    print("🚀 [System Init] Background detection thread started successfully.")
+    calibration_thread.start()
 
-    yield
+    print(
+        "🚀 [System Init] "
+        "Detection & calibration workers started."
+    )
 
-    print("⏳ [System Teardown] Shutting down services & background tasks...")
-    is_server_running = False
-    detection_control_event.clear()
-    time.sleep(0.5)
+    try:
+        yield
+
+    finally:
+        is_server_running = False
+        detection_control_event.clear()
+        calibrate_control_event.clear()
+        time.sleep(0.5)
 
 
 app = FastAPI(title="EdgeLab-AI API", lifespan=lifespan)
@@ -365,12 +520,11 @@ ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 
 @video_router.post("/start-detection")
 async def start_detection(config: StartDetection):
-    global calibration_points
-    
     calibrate_control_event.clear() 
     detection_control_event.set()
     app_state.model.need_reload = True
-    calibration_points = config.calibration_points
+    app_state.model.calibration_points = config.calibration_points
+    print(app_state.model.calibration_points)
     return {"status": "success", "message": "Camera stream with detection initiated."}
 
 
