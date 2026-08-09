@@ -27,6 +27,10 @@ from app_state import Board, app_state
 import math
 import cv2
 import numpy as np
+from pprint import pprint
+import logging
+
+logger = logging.getLogger(__name__)
 
 PATH_LABEL = "models/labels.txt"
 UPLOAD_DIR = Path("./models")
@@ -175,6 +179,81 @@ def map_to_15_slots(detections: List[Dict[str, Any]], slot_centers: Dict[int, Tu
     # Urutkan array dari slot 1 sampai 15
     return [grid_slots[i] for i in range(1, 16)]
 
+
+# ==== METRICS ==== 
+def match_boards(final_15_slots):
+    active_board = app_state.gt_state.active_board
+    boards = app_state.gt_state.boards
+    
+    current_board = next((b for b in boards if b.board_id == active_board), None)
+    if not current_board:
+        raise ValueError(f"Board dengan ID '{active_board}' tidak ditemukan.")
+    
+    gt_slots = [gt for gt in current_board.ground_truth if gt not in (None, "")]
+    total_gt_cards = len(gt_slots)
+    
+    # 1. Olah data perbandingan slot & filter deteksi valid dalam satu pass
+    slot_details = []
+    detected_slots = []
+    
+    for idx, (det, gt) in enumerate(zip(final_15_slots, gt_slots)):
+        label = det.get('label') if det else None
+        confidence = det.get('confidence', 0.0) if det else 0.0
+        is_correct = (label == gt) if det and label not in (None, "", "NULL") else False
+        
+        detail = {
+            "slot": idx + 1,
+            "detection": label,
+            "ground_truth": gt,
+            "confidence": confidence,
+            "is_correct": is_correct
+        }
+        slot_details.append(detail)
+        
+        # Simpan slot yang memiliki deteksi valid
+        if label not in (None, "", "NULL"):
+            detected_slots.append(detail)
+            
+    total_detections = len(detected_slots)
+    
+    # 2. Hitung Metrik Evaluasi
+    detection_rate = (total_detections / total_gt_cards * 100) if total_gt_cards > 0 else 0.0
+    
+    if total_detections > 0:
+        avg_confidence = sum(item["confidence"] for item in detected_slots) / total_detections
+        correct_detections = sum(1 for item in detected_slots if item["is_correct"])
+        precision = (correct_detections / total_detections * 100)
+    else:
+        avg_confidence = 0.0
+        correct_detections = 0
+        precision = 0.0
+
+    # 3. Cetak Ringkasan Log Lengkap ke Console
+    print("\n================== METRICS SUMMARY ==================")
+    print(f"Total GT Cards       : {total_gt_cards}")
+    print(f"Detection Rate       : {detection_rate:.2f}% ({total_detections}/{total_gt_cards} cards)")
+    print(f"Avg. Confidence Score: {avg_confidence:.4f} ({avg_confidence * 100:.2f}%)")
+    print(f"Precision            : {precision:.2f}% ({correct_detections}/{total_detections} correct)")
+    print("-----------------------------------------------------")
+    print("DETECTION DETAILS PER SLOT:")
+    for slot in slot_details:
+        status = "CORRECT" if slot['is_correct'] else "WRONG/MISSING"
+        print(f" Slot {slot['slot']:02d} | Det: {str(slot['detection']):<10} | GT: {str(slot['ground_truth']):<10} | Conf: {slot['confidence']:.4f} | Status: {status}")
+    print("=====================================================\n")
+
+    # 4. Return Data Metrik + Detail Setiap Slot
+    result = {
+        "metrics": {
+            "detection_rate": detection_rate,
+            "avg_confidence": avg_confidence,
+            "precision": precision
+        },
+        "slot_details": slot_details
+    }
+    app_state.model.latest_evaluation = result
+    
+    return result
+    
 #  ==== END SORTED CARDS ====
 
 # HELPER FUNCTIONS & CORE WORKER
@@ -344,7 +423,7 @@ def detection() -> None:
                         cv2.rectangle(frame, (left_raw, top_raw), (right_raw, bottom_raw), (0, 255, 0), 2)
                 
                 final_15_slots = map_to_15_slots(raw_detections, slot_centers)
-                print(final_15_slots)
+                match_boards(final_15_slots)
                 
                 end_frame = time.perf_counter()
                 frame_duration = end_frame - start_frame
@@ -825,21 +904,32 @@ async def set_active_model(payload: SelectModelRequest):
 @ws_router.websocket("/inference")
 async def websocket_inference(websocket: WebSocket):
     await websocket.accept()
+    logger.info("🔌 [WebSocket] Client connected.")
+    
     try:
         while True:
-            await websocket.send_json(
-                {
-                    "camera_error": getattr(app_state.model, "camera_error", None),
-                    "inference_fps": getattr(app_state.model, "inference_fps", 0.0),
-                    "forward_pass_ms": getattr(app_state.model, "forward_pass_ms", 0.0),
-                }
-            )
-            await asyncio.sleep(0.5)
-    except (WebSocketDisconnect, RuntimeError):
-        print("⚠️ [WebSocket] Client connection closed.")
-    finally:
-        print("🧹 [WebSocket] Connection cleanup completed.")
+            model_state = getattr(app_state, "model", None)
+            evaluation_data = getattr(app_state.model, "latest_evaluation", None)
+            payload = {
+                "camera_error": getattr(model_state, "camera_error", None) if model_state else None,
+                "inference_fps": getattr(model_state, "inference_fps", 0.0) if model_state else 0.0,
+                "forward_pass_ms": getattr(model_state, "forward_pass_ms", 0.0) if model_state else 0.0,
+            }
 
+            if evaluation_data is not None:
+                payload["evaluation"] = evaluation_data
+
+            await websocket.send_json(payload)
+            await asyncio.sleep(0.5)
+
+    except WebSocketDisconnect:
+        logger.info("⚠️ [WebSocket] Client disconnected gracefully.")
+    except RuntimeError:
+        logger.warning("⚠️ [WebSocket] Runtime error (connection lost during send).")
+    except Exception as e:
+        logger.error(f"❌ [WebSocket] Unexpected error: {e}", exc_info=True)
+    finally:
+        logger.info("🧹 [WebSocket] Connection cleanup completed.")
 
 @config_router.get("/userspace-metrics")
 async def get_userspace_metrics():

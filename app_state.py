@@ -1,4 +1,4 @@
-from typing import List, Sequence, Any
+from typing import List, Sequence, Any, Optional, Dict
 from dataclasses import dataclass, field
 from pydantic import BaseModel
 
@@ -17,6 +17,7 @@ class ModelState:
     forward_pass_ms: float = 0.0
     model: str = "ssd-mobilenet.tflite"
     calibration_points: Sequence[Any] = field(default_factory=list)
+    latest_evaluation: Optional[Dict[str, Any]] = None
 
 @dataclass
 class Board:
@@ -75,6 +76,7 @@ class GTState:
         ]
     )
     active_board: str = 'board-1'
+    listGT: Sequence[Any] = field(default_factory=list)
     
 @dataclass
 class AppState:
