@@ -183,6 +183,8 @@ def map_to_15_slots(detections: List[Dict[str, Any]], slot_centers: Dict[int, Tu
 
 # ==== METRICS ==== 
 def match_boards(final_15_slots):
+    global is_detection_running_now
+    
     active_board = getattr(app_state.gt_state, "active_board", None)
 
     # ------------------------------------------------------------------
@@ -226,6 +228,7 @@ def match_boards(final_15_slots):
         }
 
         # Simpan ke state dan return
+        is_detection_running_now = True
         app_state.model.latest_evaluation = result
         return result
 
@@ -458,7 +461,6 @@ def detection() -> None:
                 
                 app_state.model.inference_fps = round(fps, 2) 
                 app_state.model.forward_pass_ms = round(forward_pass, 2)
-                is_detection_running_now = True
                 
             with frame_lock:
                 latest_frame = frame.copy()
