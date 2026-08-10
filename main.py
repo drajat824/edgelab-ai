@@ -289,9 +289,6 @@ def match_boards(final_15_slots):
 def apply_core_affinity(core_list: List[int]) -> None:
     try:
         os.sched_setaffinity(0, set(core_list))
-        print(
-            f"📌 [CPU Manager] Thread successfully pinned to CPU Core(s): {core_list}"
-        )
     except Exception as exc:
         print(f"❌ [CPU Manager] Failed to set CPU affinity: {exc}")
 
@@ -631,12 +628,12 @@ ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 async def start_detection(config: StartDetection):
     global latest_frame
     latest_frame = None
-        
+    app_state.model.latest_evaluation = None
+    
     calibrate_control_event.clear() 
     detection_control_event.set()
     app_state.model.need_reload = True
     app_state.model.calibration_points = config.calibration_points
-    print(app_state.model.calibration_points)
     return {"status": "success", "message": "Camera stream with detection initiated."}
 
 
@@ -644,6 +641,7 @@ async def start_detection(config: StartDetection):
 async def start_calibrate():
     global latest_frame
     latest_frame = None
+    app_state.model.latest_evaluation = None
     
     detection_control_event.clear()
     calibrate_control_event.set()
@@ -854,7 +852,6 @@ async def set_active_board(payload: ActiveBoard):
             )
         
         app_state.gt_state.active_board = payload.active_board
-        print(app_state.gt_state.active_board)
         return {"status": "success", "message": "Active boards unchanged.", "data": payload.active_board}
 
     except Exception as e:
@@ -921,7 +918,6 @@ async def get_tflite_models():
 
 @file_router.post("/models")
 async def set_active_model(payload: SelectModelRequest):
-    print(payload.model_name)
     selected_name = payload.model_name.strip()
     target_file = (UPLOAD_DIR / selected_name).with_suffix(".tflite")
     if not target_file.exists() or not target_file.is_file():
