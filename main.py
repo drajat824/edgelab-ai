@@ -465,8 +465,8 @@ def detection() -> None:
 
         cap.release()
         latest_frame = None
-        app_state.model.inference_fps = 0.0
-        app_state.model.forward_pass_ms = 0.0
+        # app_state.model.inference_fps = 0.0
+        # app_state.model.forward_pass_ms = 0.0
         time.sleep(0.3)
         
 # ==== KALIBRASI ====
@@ -609,7 +609,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="EdgeLab-AI API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://10.14.1.82:5173",
+        "http://raspijst.local:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -629,7 +634,9 @@ async def start_detection(config: StartDetection):
     global latest_frame
     latest_frame = None
     app_state.model.latest_evaluation = None
-    
+    app_state.model.inference_fps = 0.0
+    app_state.model.forward_pass_ms = 0.0
+        
     calibrate_control_event.clear() 
     detection_control_event.set()
     app_state.model.need_reload = True
@@ -642,6 +649,8 @@ async def start_calibrate():
     global latest_frame
     latest_frame = None
     app_state.model.latest_evaluation = None
+    app_state.model.inference_fps = 0.0
+    app_state.model.forward_pass_ms = 0.0
     
     detection_control_event.clear()
     calibrate_control_event.set()
@@ -655,8 +664,8 @@ async def stop_video():
     calibrate_control_event.clear()
     with frame_lock:
         latest_frame = None
-    app_state.model.inference_fps = 0.0
-    app_state.model.forward_pass_ms = 0.0
+    # app_state.model.inference_fps = 0.0
+    # app_state.model.forward_pass_ms = 0.0
     return {
         "status": "success",
         "message": "Camera stream stopped. Hardware resource released.",
