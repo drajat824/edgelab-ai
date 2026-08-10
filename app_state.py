@@ -75,7 +75,7 @@ class GTState:
             )
         ]
     )
-    active_board: str = 'board-1'
+    active_board: str = 'NONE'
     listGT: Sequence[Any] = field(default_factory=list)
     
 @dataclass

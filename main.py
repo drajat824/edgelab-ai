@@ -182,25 +182,71 @@ def map_to_15_slots(detections: List[Dict[str, Any]], slot_centers: Dict[int, Tu
 
 # ==== METRICS ==== 
 def match_boards(final_15_slots):
-    active_board = app_state.gt_state.active_board
+    active_board = getattr(app_state.gt_state, "active_board", None)
+
+    # ------------------------------------------------------------------
+    # CASE 1: active_board == "NONE" / NULL / Kosong
+    # ------------------------------------------------------------------
+    if not active_board or str(active_board).upper() == "NONE":
+        slot_details = []
+        detected_slots = []
+
+        for idx, det in enumerate(final_15_slots):
+            label = det.get('label') if det else None
+            confidence = det.get('confidence', 0.0) if det else 0.0
+
+            detail = {
+                "slot": idx + 1,
+                "detection": label,
+                "ground_truth": None,  # Ground truth dikosongi
+                "confidence": confidence,
+                "is_correct": None     # Tidak ada evaluasi kebenaran
+            }
+            slot_details.append(detail)
+
+            if label not in (None, "", "NULL"):
+                detected_slots.append(detail)
+
+        total_detections = len(detected_slots)
+        
+        # Hitung Rata-rata Confidence dari slot yang terdeteksi
+        avg_confidence = (
+            sum(item["confidence"] for item in detected_slots) / total_detections
+            if total_detections > 0 else 0.0
+        )
+
+        result = {
+            "metrics": {
+                "detection_rate": None,  # Kosong karena tidak ada total GT
+                "avg_confidence": avg_confidence,
+                "precision": None        # Kosong karena tidak ada kebenaran GT
+            },
+            "slot_details": slot_details
+        }
+
+        # Simpan ke state dan return
+        app_state.model.latest_evaluation = result
+        return result
+
+    # ------------------------------------------------------------------
+    # CASE 2: active_board MENGANDUNG BOARD ID VALID (Proses Normal)
+    # ------------------------------------------------------------------
     boards = app_state.gt_state.boards
-    
     current_board = next((b for b in boards if b.board_id == active_board), None)
     if not current_board:
         raise ValueError(f"Board dengan ID '{active_board}' tidak ditemukan.")
-    
+
     gt_slots = [gt for gt in current_board.ground_truth if gt not in (None, "")]
     total_gt_cards = len(gt_slots)
-    
-    # 1. Olah data perbandingan slot & filter deteksi valid dalam satu pass
+
     slot_details = []
     detected_slots = []
-    
+
     for idx, (det, gt) in enumerate(zip(final_15_slots, gt_slots)):
         label = det.get('label') if det else None
         confidence = det.get('confidence', 0.0) if det else 0.0
         is_correct = (label == gt) if det and label not in (None, "", "NULL") else False
-        
+
         detail = {
             "slot": idx + 1,
             "detection": label,
@@ -209,39 +255,21 @@ def match_boards(final_15_slots):
             "is_correct": is_correct
         }
         slot_details.append(detail)
-        
-        # Simpan slot yang memiliki deteksi valid
+
         if label not in (None, "", "NULL"):
             detected_slots.append(detail)
-            
+
     total_detections = len(detected_slots)
-    
-    # 2. Hitung Metrik Evaluasi
     detection_rate = (total_detections / total_gt_cards * 100) if total_gt_cards > 0 else 0.0
-    
+
     if total_detections > 0:
         avg_confidence = sum(item["confidence"] for item in detected_slots) / total_detections
         correct_detections = sum(1 for item in detected_slots if item["is_correct"])
         precision = (correct_detections / total_detections * 100)
     else:
         avg_confidence = 0.0
-        correct_detections = 0
         precision = 0.0
 
-    # 3. Cetak Ringkasan Log Lengkap ke Console
-    print("\n================== METRICS SUMMARY ==================")
-    print(f"Total GT Cards       : {total_gt_cards}")
-    print(f"Detection Rate       : {detection_rate:.2f}% ({total_detections}/{total_gt_cards} cards)")
-    print(f"Avg. Confidence Score: {avg_confidence:.4f} ({avg_confidence * 100:.2f}%)")
-    print(f"Precision            : {precision:.2f}% ({correct_detections}/{total_detections} correct)")
-    print("-----------------------------------------------------")
-    print("DETECTION DETAILS PER SLOT:")
-    for slot in slot_details:
-        status = "CORRECT" if slot['is_correct'] else "WRONG/MISSING"
-        print(f" Slot {slot['slot']:02d} | Det: {str(slot['detection']):<10} | GT: {str(slot['ground_truth']):<10} | Conf: {slot['confidence']:.4f} | Status: {status}")
-    print("=====================================================\n")
-
-    # 4. Return Data Metrik + Detail Setiap Slot
     result = {
         "metrics": {
             "detection_rate": detection_rate,
@@ -250,10 +278,10 @@ def match_boards(final_15_slots):
         },
         "slot_details": slot_details
     }
+
     app_state.model.latest_evaluation = result
-    
     return result
-    
+ 
 #  ==== END SORTED CARDS ====
 
 # HELPER FUNCTIONS & CORE WORKER
@@ -439,6 +467,7 @@ def detection() -> None:
             time.sleep(0.001)
 
         cap.release()
+        latest_frame = None
         app_state.model.inference_fps = 0.0
         app_state.model.forward_pass_ms = 0.0
         time.sleep(0.3)
@@ -505,7 +534,8 @@ def calibration() -> None:
             with frame_lock:
                 latest_frame = frame.copy()
             time.sleep(0.001)
-            
+        
+        latest_frame = None
         cap.release()
 
 async def generate_mjpeg_stream(request: Request):
@@ -599,6 +629,9 @@ ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 
 @video_router.post("/start-detection")
 async def start_detection(config: StartDetection):
+    global latest_frame
+    latest_frame = None
+        
     calibrate_control_event.clear() 
     detection_control_event.set()
     app_state.model.need_reload = True
@@ -609,6 +642,9 @@ async def start_detection(config: StartDetection):
 
 @video_router.get("/start-calibrate")
 async def start_calibrate():
+    global latest_frame
+    latest_frame = None
+    
     detection_control_event.clear()
     calibrate_control_event.set()
     return {"status": "success", "message": "Camera stream for calibration initiated."}
