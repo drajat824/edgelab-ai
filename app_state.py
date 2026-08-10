@@ -32,7 +32,7 @@ class GTState:
         default_factory=lambda: [
             Board(
                 board_id="board-1",
-                board_name="Board 1",
+                board_name="Board 1 - Dataset",
                 ground_truth=[
                     "Diamond_6",
                     "Club_K",
@@ -54,7 +54,7 @@ class GTState:
             ),
             Board(
                 board_id= "board-2",
-                board_name= "Board 2",
+                board_name= "Board 2 - Dataset",
                 ground_truth= [
                     "Spades_3",
                     "Hearts_J",
@@ -71,6 +71,27 @@ class GTState:
                     "Hearts_Q",
                     "Hearts_9",
                     "Hearts_A"
+                ]
+            ),
+            Board(
+                board_id="board-3",
+                board_name="Board 3",
+                ground_truth=[
+                    "Diamond_J",
+                    "Club_A",
+                    "Spades_5",
+                    "Club_8",
+                    "Hearts_K",
+                    "Hearts_7",
+                    "Diamond_2",
+                    "Diamond_A",
+                    "Club_7",
+                    "Spades_7",
+                    "Spades_6",
+                    "Club_4",
+                    "Spades_J",
+                    "Diamond_5",
+                    "Spades_2"
                 ]
             )
         ]
