@@ -981,6 +981,7 @@ async def get_userspace_metrics():
             "status": "success",
             "fps_camera": fps_camera,
             "inference_fps": inference_fps,
+            "detection_run": detection_control_event.is_set()
         }
     except Exception:
         raise HTTPException(
