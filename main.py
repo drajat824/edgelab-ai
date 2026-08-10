@@ -45,6 +45,7 @@ detection_control_event = threading.Event()
 calibrate_control_event = threading.Event()
 camera_hardware = 0
 
+is_detection_running_now = False
 
 # PYDANTIC SCHEMASc
 
@@ -295,7 +296,7 @@ def apply_core_affinity(core_list: List[int]) -> None:
 # ==== DETEKSI ====
 
 def detection() -> None:
-    global latest_frame, is_server_running
+    global latest_frame, is_server_running, is_detection_running_now
     app_state.model.camera_error = None 
     target_fps = getattr(app_state.model, "fps_camera", 15) 
     slot_centers = get_slot_center()
@@ -457,6 +458,7 @@ def detection() -> None:
                 
                 app_state.model.inference_fps = round(fps, 2) 
                 app_state.model.forward_pass_ms = round(forward_pass, 2)
+                is_detection_running_now = True
                 
             with frame_lock:
                 latest_frame = frame.copy()
@@ -465,6 +467,7 @@ def detection() -> None:
 
         cap.release()
         latest_frame = None
+        is_detection_running_now = False
         # app_state.model.inference_fps = 0.0
         # app_state.model.forward_pass_ms = 0.0
         time.sleep(0.3)
@@ -974,6 +977,8 @@ async def websocket_inference(websocket: WebSocket):
 
 @config_router.get("/userspace-metrics")
 async def get_userspace_metrics():
+    global is_detection_running_now
+    
     try:
         fps_camera = getattr(app_state.model, "fps_camera")
         inference_fps = getattr(app_state.model, "inference_fps")
@@ -981,7 +986,7 @@ async def get_userspace_metrics():
             "status": "success",
             "fps_camera": fps_camera,
             "inference_fps": inference_fps,
-            "detection_run": detection_control_event.is_set()
+            "detection_run": is_detection_running_now
         }
     except Exception:
         raise HTTPException(
