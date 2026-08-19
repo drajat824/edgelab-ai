@@ -265,7 +265,9 @@ def match_boards(final_15_slots: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def apply_core_affinity(core_list: List[int]) -> None:
     try:
-        os.sched_setaffinity(0, set(core_list))
+        thread_id = threading.get_native_id()
+        os.sched_setaffinity(thread_id, set(core_list))
+            
     except Exception as exc:
         print(f"❌ [CPU Manager] Failed to set CPU affinity: {exc}")
 
