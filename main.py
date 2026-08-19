@@ -362,6 +362,7 @@ def detection() -> None:
         interpreter = None
 
         try:
+            print(app_state.model.model)
             interpreter = Interpreter(model_path=Path("./models") / app_state.model.model, num_threads=current_threads)
             interpreter.allocate_tensors()
             app_state.model.need_reload = False
@@ -399,16 +400,22 @@ def detection() -> None:
                 continue
             
             if interpreter is not None and input_details is not None and output_details is not None:
-                image_color = cv2.cvtColor(warped_board, cv2.COLOR_BGR2RGB)
-                input_data = np.expand_dims(image_color, axis=0).astype(np.float32) / 255.0
-                
-                interpreter.set_tensor(input_details[0]["index"], input_data) 
-                interpreter.invoke()
-                
-                scores = interpreter.get_tensor(output_details[0]["index"])[0] 
-                boxes = interpreter.get_tensor(output_details[1]["index"])[0] 
-                num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0]) 
-                classes = interpreter.get_tensor(output_details[3]["index"])[0]
+                try:
+                    image_color = cv2.cvtColor(warped_board, cv2.COLOR_BGR2RGB)
+                    input_data = np.expand_dims(image_color, axis=0).astype(np.float32) / 255.0
+                    
+                    interpreter.set_tensor(input_details[0]["index"], input_data) 
+                    interpreter.invoke()
+                    
+                    scores = interpreter.get_tensor(output_details[0]["index"])[0] 
+                    boxes = interpreter.get_tensor(output_details[1]["index"])[0] 
+                    num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0]) 
+                    classes = interpreter.get_tensor(output_details[3]["index"])[0]
+                except Exception as exc:
+                    error_msg = f"Failed to allocate TFLite interpreter: {exc}"
+                    app_state.model.camera_error = error_msg
+                    time.sleep(0.01)
+                    break
                 
                 raw_detections = []
                 frame_h, frame_w = frame.shape[:2]
@@ -466,7 +473,7 @@ def detection() -> None:
                 latest_frame = frame.copy()
                 
             time.sleep(0.001)
-
+            
         cap.release()
         latest_frame = None
         is_detection_running_now = False
@@ -614,7 +621,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="EdgeLab-AI API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://edgelab.local:5173"],
+    allow_origins=["http://edgelab.local:5173", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -633,6 +640,7 @@ ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
 async def start_detection(config: StartDetection):
     global latest_frame
     latest_frame = None
+    app_state.model.camera_error = None
     app_state.model.latest_evaluation = None
     app_state.model.inference_fps = 0.0
     app_state.model.forward_pass_ms = 0.0
@@ -936,6 +944,9 @@ async def set_active_model(payload: SelectModelRequest):
         )
     app_state.model.model = selected_name
     app_state.model.need_reload = True
+    app_state.model.camera_error = None
+    detection_control_event.clear()
+    
     return {
         "status": "success",
         "current_model": app_state.model.model,
