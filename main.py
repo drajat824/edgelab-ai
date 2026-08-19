@@ -239,7 +239,7 @@ def match_boards(final_15_slots: List[Dict[str, Any]]) -> Dict[str, Any]:
     if is_active_none:
         detection_rate = None
         precision = None
-        is_detection_running_now = True
+        
     else:
         detection_rate = (total_detections / total_gt_cards * 100) if total_gt_cards > 0 else 0.0
         if total_detections > 0:
@@ -293,7 +293,8 @@ def detection() -> None:
         if not detection_control_event.is_set():
             time.sleep(0.1)
             continue
-
+        
+        is_detection_running_now = True
         app_state.model.camera_error = None
         target_fps = getattr(app_state.model, "fps_camera", 15)
         calibration_points = getattr(app_state.model, "calibration_points", [])
