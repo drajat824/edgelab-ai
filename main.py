@@ -47,7 +47,7 @@ frame_lock = threading.Lock()
 
 detection_control_event = threading.Event()
 calibrate_control_event = threading.Event()
-camera_hardware = 0
+camera_hardware = 2
 
 is_detection_running_now = False
 
@@ -271,6 +271,7 @@ def camera_worker() -> None:
     global raw_frame, is_server_running
     
     cap = None
+    failed_read_count = 0  # Tambahkan counter deteksi kegagalan
     
     while is_server_running:
         if not detection_control_event.is_set() and not calibrate_control_event.is_set():
@@ -287,23 +288,32 @@ def camera_worker() -> None:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
                 fps = getattr(app_state.model, "fps_camera", 15)
                 cap.set(cv2.CAP_PROP_FPS, fps)
+                failed_read_count = 0 # Reset counter jika berhasil buka
             else:
                 app_state.model.camera_error = "Unable to open webcam device."
-                time.sleep(1.0)
+                time.sleep(2.0) # Jeda lebih lama di Pi jika gagal buka
                 continue
 
         ret, frame = cap.read()
         if ret:
             with raw_frame_lock:
                 raw_frame = frame.copy()
+            failed_read_count = 0 # Reset counter jika berhasil baca
         else:
-            app_state.model.camera_error = "Failed to capture frame from camera."
+            failed_read_count += 1
+            app_state.model.camera_error = f"Failed to capture frame ({failed_read_count}/5)"
+            
+            # Jika gagal baca 5x berturut-turut, paksa reset kamera
+            if failed_read_count >= 5:
+                print("⚠️ [Hardware] Kamera macet, mencoba re-inisialisasi...")
+                cap.release()
+                cap = None
+                time.sleep(1.0)
             
         time.sleep(0.005)
 
     if cap is not None and cap.isOpened():
         cap.release()
-
 
 # ==== 2. THREAD DETEKSI (CONSUMER 1) ====
 def detection() -> None:
