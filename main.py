@@ -886,9 +886,9 @@ async def set_active_model(payload: SelectModelRequest):
             detail=f"Berkas model '{selected_name}' tidak ditemukan di folder models/.",
         )
     app_state.model.model = selected_name
-    app_state.model.need_reload = True
-    app_state.model.camera_error = None
-    detection_control_event.clear()
+    # app_state.model.need_reload = True
+    # app_state.model.camera_error = None
+    # detection_control_event.clear()
 
     return {
         "status": "success",
