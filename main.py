@@ -582,11 +582,12 @@ async def start_detection(config: StartDetection):
     app_state.model.latest_evaluation = None
     app_state.model.inference_fps = 0.0
     app_state.model.forward_pass_ms = 0.0
-
-    calibrate_control_event.clear()
-    detection_control_event.set()
-    app_state.model.need_reload = True
     app_state.model.calibration_points = config.calibration_points
+    calibrate_control_event.clear()
+    app_state.model.need_reload = True
+    
+    time.sleep(0.5)
+    detection_control_event.set()    
     return {"status": "success", "message": "Camera stream with detection initiated."}
 
 
@@ -597,8 +598,9 @@ async def start_calibrate():
     app_state.model.latest_evaluation = None
     app_state.model.inference_fps = 0.0
     app_state.model.forward_pass_ms = 0.0
-
     detection_control_event.clear()
+    
+    time.sleep(0.5)
     calibrate_control_event.set()
     return {"status": "success", "message": "Camera stream for calibration initiated."}
 
