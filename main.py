@@ -36,8 +36,14 @@ UPLOAD_DIR = Path("./models")
 
 # Thread Control Flags & Locks
 is_server_running = True
-frame_lock = threading.Lock()
+
+# --- Arsitektur Frame Baru ---
+raw_frame: Optional[np.ndarray] = None
+raw_frame_lock = threading.Lock()
+
 latest_frame: Optional[np.ndarray] = None
+frame_lock = threading.Lock()
+# -----------------------------
 
 detection_control_event = threading.Event()
 calibrate_control_event = threading.Event()
@@ -50,38 +56,30 @@ is_detection_running_now = False
 class ThreadInput(BaseModel):
     thread: int = 4
 
-
 class CoreInput(BaseModel):
     core: List[int] = [0, 1, 2, 3]
 
-
 class FpsInput(BaseModel):
     fps_camera: int = 5
-
 
 class BoardCreate(BaseModel):
     board_id: str
     board_name: str
     ground_truth: List[str] = []
 
-
 class BoardUpdate(BaseModel):
     board_name: Optional[str] = None
     ground_truth: Optional[List[str]] = None
 
-
 class SelectModelRequest(BaseModel):
     model_name: str
-
 
 class Point(BaseModel):
     x: float
     y: float
 
-
 class StartDetection(BaseModel):
     calibration_points: List[Point] = []
-
 
 class ActiveBoard(BaseModel):
     active_board: str
@@ -197,7 +195,6 @@ def match_boards(final_15_slots: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not current_board:
             raise ValueError(f"Board dengan ID '{active_board}' tidak ditemukan.")
         
-        # Extract ground truth slots from the matched board
         gt_slots = list(current_board.ground_truth)
         total_gt_cards = len([gt for gt in gt_slots if gt not in (None, "")])
 
@@ -239,7 +236,6 @@ def match_boards(final_15_slots: List[Dict[str, Any]]) -> Dict[str, Any]:
     if is_active_none:
         detection_rate = None
         precision = None
-        
     else:
         detection_rate = (total_detections / total_gt_cards * 100) if total_gt_cards > 0 else 0.0
         if total_detections > 0:
@@ -260,21 +256,58 @@ def match_boards(final_15_slots: List[Dict[str, Any]]) -> Dict[str, Any]:
     app_state.model.latest_evaluation = result
     return result
 
-# HELPER FUNCTIONS & CORE WORKER
 
+# HELPER FUNCTIONS & CORE WORKER
 def apply_core_affinity(core_list: List[int]) -> None:
     try:
         thread_id = threading.get_native_id()
         os.sched_setaffinity(thread_id, set(core_list))
-            
     except Exception as exc:
         print(f"❌ [CPU Manager] Failed to set CPU affinity: {exc}")
 
 
-# ==== DETEKSI ====
+# ==== 1. THREAD KAMERA (PRODUCER) ====
+def camera_worker() -> None:
+    global raw_frame, is_server_running
+    
+    cap = None
+    
+    while is_server_running:
+        if not detection_control_event.is_set() and not calibrate_control_event.is_set():
+            if cap is not None and cap.isOpened():
+                cap.release()
+                cap = None
+            time.sleep(0.1)
+            continue
+            
+        if cap is None or not cap.isOpened():
+            cap = cv2.VideoCapture(camera_hardware, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
+                fps = getattr(app_state.model, "fps_camera", 15)
+                cap.set(cv2.CAP_PROP_FPS, fps)
+            else:
+                app_state.model.camera_error = "Unable to open webcam device."
+                time.sleep(1.0)
+                continue
 
+        ret, frame = cap.read()
+        if ret:
+            with raw_frame_lock:
+                raw_frame = frame.copy()
+        else:
+            app_state.model.camera_error = "Failed to capture frame from camera."
+            
+        time.sleep(0.005)
+
+    if cap is not None and cap.isOpened():
+        cap.release()
+
+
+# ==== 2. THREAD DETEKSI (CONSUMER 1) ====
 def detection() -> None:
-    global latest_frame, is_server_running, is_detection_running_now
+    global latest_frame, is_server_running, is_detection_running_now, raw_frame
     app_state.model.camera_error = None
     slot_centers = get_slot_center()
 
@@ -296,36 +329,14 @@ def detection() -> None:
         
         is_detection_running_now = True
         app_state.model.camera_error = None
-        target_fps = getattr(app_state.model, "fps_camera", 15)
         calibration_points = getattr(app_state.model, "calibration_points", [])
-
-        cap = None
-        max_retries = 5
-
-        for attempt in range(max_retries):
-            cap = cv2.VideoCapture(camera_hardware, cv2.CAP_V4L2)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
-                cap.set(cv2.CAP_PROP_FPS, target_fps)
-                break
-            if cap:
-                cap.release()
-            time.sleep(0.3)
-
-        if cap is None or not cap.isOpened():
-            error_msg = "Unable to open webcam device (/dev/video2)."
-            app_state.model.camera_error = error_msg
-            detection_control_event.clear()
-            time.sleep(1.0)
-            continue
 
         current_threads = app_state.model.thread
         active_cores = getattr(app_state.model, "core", [2, 3])
         apply_core_affinity(active_cores)
 
         try:
-            print(app_state.model.model)
+            print(f"Loading Model: {app_state.model.model}")
             interpreter = Interpreter(
                 model_path=Path("./models") / app_state.model.model,
                 num_threads=current_threads,
@@ -339,12 +350,10 @@ def detection() -> None:
             app_state.model.camera_error = error_msg
             app_state.model.inference_fps = 0.0
             app_state.model.forward_pass_ms = 0.0
-            cap.release()
             detection_control_event.clear()
             time.sleep(1.0)
             continue
 
-        # Calculate perspective matrices once per detection session
         M_320, _ = get_board_matrices(calibration_points, target_w=320, target_h=320)
         _, M_inv = get_board_matrices(calibration_points, target_w=3900, target_h=3180)
 
@@ -354,11 +363,15 @@ def detection() -> None:
                 break
 
             start_frame = time.perf_counter()
-            ret, frame = cap.read()
-            if not ret:
-                app_state.model.camera_error = "Failed to capture frame in detection."
+            
+            frame = None
+            with raw_frame_lock:
+                if raw_frame is not None:
+                    frame = raw_frame.copy()
+            
+            if frame is None:
                 time.sleep(0.01)
-                break
+                continue
 
             warped_board = warp_board(frame, M_320, target_w=320, target_h=320)
             if warped_board is None or not isinstance(warped_board, np.ndarray):
@@ -377,7 +390,7 @@ def detection() -> None:
                     num_detections = int(interpreter.get_tensor(output_details[2]["index"])[0])
                     classes = interpreter.get_tensor(output_details[3]["index"])[0]
                 except Exception as exc:
-                    error_msg = f"Failed to allocate TFLite interpreter: {exc}"
+                    error_msg = f"Failed inference execution: {exc}"
                     app_state.model.camera_error = error_msg
                     time.sleep(0.01)
                     break
@@ -444,16 +457,13 @@ def detection() -> None:
 
             time.sleep(0.001)
 
-        cap.release()
-        latest_frame = None
         is_detection_running_now = False
-        time.sleep(0.3)
+        time.sleep(0.1)
 
 
-# ==== KALIBRASI ====
-
+# ==== 3. THREAD KALIBRASI (CONSUMER 2) ====
 def calibration() -> None:
-    global latest_frame, is_server_running
+    global latest_frame, is_server_running, raw_frame
 
     while is_server_running:
         if not calibrate_control_event.is_set():
@@ -461,23 +471,16 @@ def calibration() -> None:
             continue
 
         app_state.model.camera_error = None
-        cap = cv2.VideoCapture(camera_hardware, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
-        cap.set(cv2.CAP_PROP_FPS, getattr(app_state.model, "fps_camera", 15))
-
-        if not cap.isOpened():
-            error_msg = "Unable to open webcam for calibration."
-            app_state.model.camera_error = error_msg
-            calibrate_control_event.clear()
-            cap.release()
-            time.sleep(1.0)
-            continue
 
         while is_server_running and calibrate_control_event.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                break
+            frame = None
+            with raw_frame_lock:
+                if raw_frame is not None:
+                    frame = raw_frame.copy()
+            
+            if frame is None:
+                time.sleep(0.01)
+                continue
 
             h_frame, w_frame = frame.shape[:2]
             w_box = 500
@@ -489,10 +492,8 @@ def calibration() -> None:
 
             with frame_lock:
                 latest_frame = frame.copy()
-            time.sleep(0.001)
-
-        latest_frame = None
-        cap.release()
+                
+            time.sleep(0.01)
 
 
 async def generate_mjpeg_stream(request: Request):
@@ -533,20 +534,17 @@ async def generate_mjpeg_stream(request: Request):
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global is_server_running
-
     is_server_running = True
 
-    detection_thread = threading.Thread(
-        target=detection, daemon=True, name="DetectionWorker"
-    )
-    calibration_thread = threading.Thread(
-        target=calibration, daemon=True, name="CalibrationWorker"
-    )
+    camera_thread = threading.Thread(target=camera_worker, daemon=True, name="CameraWorker")
+    detection_thread = threading.Thread(target=detection, daemon=True, name="DetectionWorker")
+    calibration_thread = threading.Thread(target=calibration, daemon=True, name="CalibrationWorker")
 
+    camera_thread.start()
     detection_thread.start()
     calibration_thread.start()
 
-    print("🚀 [System Init] Detection & calibration workers started.")
+    print("🚀 [System Init] Camera, Detection & Calibration workers started.")
 
     try:
         yield
@@ -583,10 +581,12 @@ async def start_detection(config: StartDetection):
     app_state.model.inference_fps = 0.0
     app_state.model.forward_pass_ms = 0.0
     app_state.model.calibration_points = config.calibration_points
-    calibrate_control_event.clear()
     app_state.model.need_reload = True
     
-    time.sleep(0.5)
+    # Matikan event kalibrasi terlebih dahulu
+    calibrate_control_event.clear()
+    
+    # Nyalakan event deteksi (instan tanpa time.sleep keras)
     detection_control_event.set()    
     return {"status": "success", "message": "Camera stream with detection initiated."}
 
@@ -598,9 +598,11 @@ async def start_calibrate():
     app_state.model.latest_evaluation = None
     app_state.model.inference_fps = 0.0
     app_state.model.forward_pass_ms = 0.0
+    
+    # Matikan event deteksi terlebih dahulu
     detection_control_event.clear()
     
-    time.sleep(0.5)
+    # Nyalakan event kalibrasi
     calibrate_control_event.set()
     return {"status": "success", "message": "Camera stream for calibration initiated."}
 
@@ -886,10 +888,6 @@ async def set_active_model(payload: SelectModelRequest):
             detail=f"Berkas model '{selected_name}' tidak ditemukan di folder models/.",
         )
     app_state.model.model = selected_name
-    # app_state.model.need_reload = True
-    # app_state.model.camera_error = None
-    # detection_control_event.clear()
-
     return {
         "status": "success",
         "current_model": app_state.model.model,
