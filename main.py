@@ -304,7 +304,7 @@ def camera_worker() -> None:
             app_state.model.camera_error = f"Failed to capture frame ({failed_read_count}/5)"
             
             # Jika gagal baca 5x berturut-turut, paksa reset kamera
-            if failed_read_count >= 5:
+            if failed_read_count >= 3:
                 print("⚠️ [Hardware] Kamera macet, mencoba re-inisialisasi...")
                 cap.release()
                 cap = None
