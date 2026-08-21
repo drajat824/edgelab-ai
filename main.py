@@ -47,7 +47,7 @@ frame_lock = threading.Lock()
 
 detection_control_event = threading.Event()
 calibrate_control_event = threading.Event()
-camera_hardware = 2
+camera_hardware = 0
 
 is_detection_running_now = False
 
