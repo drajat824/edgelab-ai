@@ -270,7 +270,6 @@ def apply_core_affinity(core_list: List[int]) -> None:
 def camera_worker() -> None:
     global raw_frame, is_server_running
     
-    fps = 30
     cap = None
     failed_read_count = 0  # Tambahkan counter deteksi kegagalan
     
@@ -287,8 +286,7 @@ def camera_worker() -> None:
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 660)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 380)
-                if detection_control_event.is_set():
-                    fps = getattr(app_state.model, "fps_camera", 15)
+                fps = getattr(app_state.model, "fps_camera", 15)
                 cap.set(cv2.CAP_PROP_FPS, fps)
                 failed_read_count = 0 # Reset counter jika berhasil buka
             else:
