@@ -332,8 +332,14 @@ def detection() -> None:
         app_state.model.camera_error = error_msg
         return
 
+    interpreter = None
+
     while is_server_running:
         if not detection_control_event.is_set():
+            if interpreter is not None:
+                del interpreter
+                interpreter = None
+            is_detection_running_now = False
             time.sleep(0.1)
             continue
         
@@ -345,10 +351,14 @@ def detection() -> None:
         active_cores = getattr(app_state.model, "core", [2, 3])
         apply_core_affinity(active_cores)
 
+        # Muat atau muat ulang interpreter jika model berganti
         try:
             print(f"Loading Model: {app_state.model.model}")
+            if interpreter is not None:
+                del interpreter  # Bersihkan interpreter lama sebelum membuat yang baru
+                
             interpreter = Interpreter(
-                model_path=Path("./models") / app_state.model.model,
+                model_path=str(PATH / "./models" / app_state.model.model), # Sesuaikan path jika perlu
                 num_threads=current_threads,
             )
             interpreter.allocate_tensors()
@@ -360,7 +370,7 @@ def detection() -> None:
             app_state.model.camera_error = error_msg
             app_state.model.inference_fps = 0.0
             app_state.model.forward_pass_ms = 0.0
-            detection_control_event.clear()
+            app_state.model.need_reload = True
             time.sleep(1.0)
             continue
 
@@ -368,8 +378,8 @@ def detection() -> None:
         _, M_inv = get_board_matrices(calibration_points, target_w=3900, target_h=3180)
 
         while is_server_running and detection_control_event.is_set():
+            # Jika ada permintaan ganti model atau thread/core, keluar dari loop inner untuk reload
             if getattr(app_state.model, "need_reload", False):
-                app_state.model.need_reload = False
                 break
 
             start_frame = time.perf_counter()
@@ -467,9 +477,8 @@ def detection() -> None:
 
             time.sleep(0.001)
 
-        is_detection_running_now = False
-        time.sleep(0.1)
-
+    is_detection_running_now = False
+    time.sleep(0.1)
 
 # ==== 3. THREAD KALIBRASI (CONSUMER 2) ====
 def calibration() -> None:
