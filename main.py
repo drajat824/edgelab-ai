@@ -897,6 +897,7 @@ async def set_active_model(payload: SelectModelRequest):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Berkas model '{selected_name}' tidak ditemukan di folder models/.",
         )
+    app_state.model.need_reload = True
     app_state.model.model = selected_name
     return {
         "status": "success",
