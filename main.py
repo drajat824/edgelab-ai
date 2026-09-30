@@ -582,11 +582,11 @@ app.add_middleware(
 )
 
 # ROUTERS DEFINITION
-video_router = APIRouter(prefix="", tags=["Video Control"])
+video_router = APIRouter(prefix="/api", tags=["Video Control"])
 config_router = APIRouter(prefix="/api", tags=["Hardware & Model Configuration"])
 file_router = APIRouter(prefix="/api", tags=["File Model Configuration"])
 gt_router = APIRouter(prefix="/api/gt", tags=["Ground Truth Management"])
-ws_router = APIRouter(prefix="/ws", tags=["WebSockets"])
+ws_router = APIRouter(prefix="/api/ws", tags=["WebSockets"])
 
 
 @video_router.post("/start-detection")
