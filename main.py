@@ -115,9 +115,7 @@ def get_board_matrices(
 
 
 def warp_board(image: np.ndarray, M: np.ndarray, target_w: int = 320, target_h: int = 320) -> np.ndarray:
-    img = cv2.warpPerspective(image, M, (target_w, target_h))
-    cv2.imwrite("warped_board.jpg", img)
-    return img
+    return cv2.warpPerspective(image, M, (target_w, target_h))
 
 
 def get_slot_center(img_w: int = 3900, img_h: int = 3180) -> Dict[int, Tuple[float, float]]:
